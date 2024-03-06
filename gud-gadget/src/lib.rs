@@ -5,7 +5,7 @@ use tracing::{debug, trace, warn};
 use usb_gadget::Class;
 use usb_gadget::function::custom::{CtrlSender, Custom, Endpoint, EndpointDirection, EndpointReceiver, Interface};
 use usb_gadget::function::{custom, Handle};
-use bytes::{Buf, BytesMut};
+use bytes::BytesMut;
 
 const GUD_DISPLAY_MAGIC: u32 = 0x1d50614d;
 
@@ -38,6 +38,8 @@ const GUD_CONNECTOR_TYPE_PANEL: u8 = 0;
 
 const GUD_STATUS_OK: u8 = 0;
 
+const GUD_COMPRESSION_LZ4: u8 = 0x01;
+
 #[derive(Serialize)]
 struct ConnectorDescriptor {
     connector_type: u8,
@@ -50,7 +52,7 @@ pub struct Function {
 
 pub struct PixelDataEndpoint {
     ep_rx: EndpointReceiver,
-    ep_buf: Option<BytesMut>,
+    ep_buf: Vec<BytesMut>,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +104,7 @@ impl<'a> GetDescriptorRequest<'a> {
             version: 1,
             flags: 0,
             compression: 0,
+            // compression: GUD_COMPRESSION_LZ4,
             max_height,
             max_width,
             min_height,
@@ -119,10 +122,7 @@ impl<'a> GetDescriptorRequest<'a> {
 }
 
 impl<'a> GetDisplayModesRequest<'a> {
-    pub fn send_modes(self, modes: &[DisplayMode]) -> anyhow::Result<()>
-    // where
-    //     I: IntoIterator<Item = &'b DisplayMode>
-    {
+    pub fn send_modes(self, modes: &[DisplayMode]) -> anyhow::Result<()> {
         let size = 24 * modes.len();
         if size > self.sender.len() {
             // TODO: proper Err
@@ -162,13 +162,11 @@ impl Function {
                 .with_endpoint(Endpoint::bulk(ep1_dir)))
             .build();
 
-        // let ep_max_packet_size = ep_rx.max_packet_size().unwrap();
-
         (Self {
             ep0,
         }, PixelDataEndpoint {
             ep_rx,
-            ep_buf: Some(BytesMut::with_capacity(1024)),
+            ep_buf: Vec::new(),
         }, handle)
     }
 
@@ -189,7 +187,10 @@ impl Function {
                             return Ok(Some(Event::GetDescriptorRequest(GetDescriptorRequest { sender: req })));
                         }
                         GUD_REQ_GET_FORMATS => {
-                            req.send(&[GUD_PIXEL_FORMAT_XRGB8888]).context("send pixel formats")?;
+                            req.send(&[
+                                // GUD_PIXEL_FORMAT_XRGB8888,
+                                GUD_PIXEL_FORMAT_RGB565,
+                            ]).context("send pixel formats")?;
                             debug!("sent pixel formats");
                         }
                         GUD_REQ_GET_PROPERTIES => {
@@ -275,8 +276,8 @@ impl PixelDataEndpoint {
     pub fn recv_buffer(&mut self, info: SetBuffer, mut fb: &mut [u8], fb_pitch: usize) -> anyhow::Result<()> {
         let mut remaining = info.length as usize;
         let max_packet_size = self.ep_rx.max_packet_size().unwrap();
-        // TODO: use active pixel format
-        let pixel_size = 4;
+        // TODO: use pixel format provided in state check
+        let pixel_size = (info.length / info.width / info.height) as usize;
 
         // Advance framebuffer ptr to starting position.
         fb = &mut fb[fb_pitch * info.y as usize..];
@@ -289,12 +290,13 @@ impl PixelDataEndpoint {
         let mut line = &mut fb[line_offset..(line_offset + line_width)];
 
         while remaining > 0 {
-            let data = self.ep_rx.recv(BytesMut::with_capacity(max_packet_size)).context("read bulk ep")?;
-            if data.is_none() {
+            let buf = self.ep_buf.pop().unwrap_or_else(|| BytesMut::with_capacity(max_packet_size));
+            let buf = self.ep_rx.recv(buf).context("read bulk ep")?;
+            if buf.is_none() {
                 continue;
             }
-            let data = data.unwrap();
-            let mut data = data.as_ref();
+            let buf = buf.unwrap();
+            let mut data = buf.as_ref();
             remaining -= data.len();
 
             while data.len() > 0 {
@@ -314,13 +316,10 @@ impl PixelDataEndpoint {
                 data = &data[src.len()..];
                 line = &mut line[src.len()..];
             }
+
+            self.ep_buf.push(buf);
         }
 
         Ok(())
     }
-}
-
-struct FramebufferWriter<'a> {
-    fb: &'a mut [u8],
-
 }

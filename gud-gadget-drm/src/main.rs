@@ -93,18 +93,23 @@ fn main() -> anyhow::Result<()> {
 
     let mode = connector.modes().first().unwrap();
 
+    println!("picked mode {:?}", mode);
+
     let (width, height) = mode.size();
     let mut db = card
-        .create_dumb_buffer((width.into(), height.into()), drm::buffer::DrmFourcc::Xrgb8888, 32)
+        // .create_dumb_buffer((width.into(), height.into()), drm::buffer::DrmFourcc::Xrgb8888, 32)
+        .create_dumb_buffer((width.into(), height.into()), drm::buffer::DrmFourcc::Rgb565, 16)
         .expect("Could not create dumb buffer");
 
     let fb = card
-        .add_framebuffer(&db, 32, 32)
+        .add_framebuffer(&db, 16, 16)
         .expect("Could not create FB");
     card.set_crtc(crtc.handle(), Some(fb), (0, 0), &[connector.handle()], Some(*mode))
         .expect("Could not set CRTC");
 
     let pitch = db.pitch();
+
+    let mut mapping = card.map_dumb_buffer(&mut db).expect("map_dumb_buffer failed");
 
     while running.load(Ordering::Relaxed) {
         if let Ok(Some(event)) = gud.event(Duration::from_millis(100)) {
@@ -147,10 +152,7 @@ fn main() -> anyhow::Result<()> {
                     }]).expect("failed to send modes");
                 },
                 Event::Buffer(info) => {
-                    {
-                        let mut mapping = card.map_dumb_buffer(&mut db).expect("map_dumb_buffer failed");
-                        gud_data.recv_buffer(info, mapping.as_mut(), pitch as usize).expect("recv_buffer failed");
-                    }
+                    gud_data.recv_buffer(info, mapping.as_mut(), pitch as usize).expect("recv_buffer failed");
                 }
             }
         }
