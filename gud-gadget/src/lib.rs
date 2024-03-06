@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace, warn};
 use usb_gadget::Class;
 use usb_gadget::function::custom::{CtrlSender, Custom, Endpoint, EndpointDirection, EndpointReceiver, Interface};
 use usb_gadget::function::{custom, Handle};
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 
 const GUD_DISPLAY_MAGIC: u32 = 0x1d50614d;
 
@@ -52,7 +52,12 @@ pub struct Function {
 
 pub struct PixelDataEndpoint {
     ep_rx: EndpointReceiver,
+    // A collection of the small buffers we've allocated for submission to AIO to read from the endpoint.
     ep_buf: Vec<BytesMut>,
+    // The full contents of a transmitted buffer are copied here.
+    buf: BytesMut,
+    // If compression is enabled, the received buffer is decompressed here.
+    compress_buf: BytesMut,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,8 +108,7 @@ impl<'a> GetDescriptorRequest<'a> {
             magic: GUD_DISPLAY_MAGIC,
             version: 1,
             flags: 0,
-            compression: 0,
-            // compression: GUD_COMPRESSION_LZ4,
+            compression: GUD_COMPRESSION_LZ4,
             max_height,
             max_width,
             min_height,
@@ -167,6 +171,8 @@ impl Function {
         }, PixelDataEndpoint {
             ep_rx,
             ep_buf: Vec::new(),
+            buf: BytesMut::new(),
+            compress_buf: BytesMut::new(),
         }, handle)
     }
 
@@ -274,51 +280,67 @@ impl Function {
 
 impl PixelDataEndpoint {
     pub fn recv_buffer(&mut self, info: SetBuffer, mut fb: &mut [u8], fb_pitch: usize) -> anyhow::Result<()> {
-        let mut remaining = info.length as usize;
+        let start = Instant::now();
         let max_packet_size = self.ep_rx.max_packet_size().unwrap();
         // TODO: use pixel format provided in state check
         let pixel_size = (info.length / info.width / info.height) as usize;
 
-        // Advance framebuffer ptr to starting position.
-        fb = &mut fb[fb_pitch * info.y as usize..];
+        let len = if info.compression > 0 { info.compressed_length } else { info.length } as usize;
+        self.buf.clear();
 
-        // Calculate starting position (in bytes) for each line.
-        let line_offset = pixel_size * info.x as usize;
-        // Total width of a line (in bytes).
-        let line_width = pixel_size * info.width as usize;
-        // Set up a slice for current line of pixels (this is what we'll copy to).
-        let mut line = &mut fb[line_offset..(line_offset + line_width)];
+        // Ensure the buffer is large enough to fit all incoming data.
+        if self.buf.capacity() < len {
+            self.buf.reserve(len - self.buf.capacity());
+        }
 
-        while remaining > 0 {
+        // Read the incoming data fully into the buffer.
+        let read_start = Instant::now();
+        while self.buf.len() < len {
             let buf = self.ep_buf.pop().unwrap_or_else(|| BytesMut::with_capacity(max_packet_size));
             let buf = self.ep_rx.recv(buf).context("read bulk ep")?;
             if buf.is_none() {
                 continue;
             }
-            let buf = buf.unwrap();
-            let mut data = buf.as_ref();
-            remaining -= data.len();
-
-            while data.len() > 0 {
-                if line.len() == 0 {
-                    // Advance to the next line in the framebuffer.
-                    fb = &mut fb[fb_pitch..];
-                    // Update line slice to new position in fb.
-                    line = &mut fb[line_offset..(line_offset + line_width)];
-                }
-
-                let src = &data[0..std::cmp::min(line.len(), data.len())];
-
-                // Do the copy.
-                (&mut line[0..src.len()]).copy_from_slice(src);
-
-                // Advance the position in current line slice, and in incoming data slice.
-                data = &data[src.len()..];
-                line = &mut line[src.len()..];
-            }
-
+            let mut buf = buf.unwrap();
+            self.buf.extend_from_slice(&buf);
+            buf.clear();
             self.ep_buf.push(buf);
         }
+        trace!("read buffer took {}ms", read_start.elapsed().as_millis());
+
+        if self.buf.len() != len {
+            // TODO: proper Err
+            panic!("expected buf len {}, got {}", len, self.buf.len());
+        }
+
+        let buf = if info.compression > 0 {
+            let decompress_start = Instant::now();
+            if self.compress_buf.len() < info.length as usize {
+                self.compress_buf.resize(info.length as usize - self.compress_buf.capacity(), 0);
+            }
+            lz4::block::decompress_to_buffer(&self.buf, Some(info.length as i32), &mut self.compress_buf).context("lz4 decompress")?;
+            trace!("decompress buffer took {}ms", read_start.elapsed().as_millis());
+            &self.compress_buf
+        } else {
+            &self.buf
+        };
+
+        let mut y = info.y as usize;
+        let end_y = (info.y + info.height) as usize;
+
+        let line_len = info.width as usize * pixel_size;
+        let line_start = info.x as usize * pixel_size;
+
+        let mut buf_pos = 0usize;
+        while y < end_y {
+            let fb_start = (y * fb_pitch) + line_start;
+            let fb_end = fb_start + line_len;
+            fb[fb_start..fb_end].copy_from_slice(&buf[buf_pos..buf_pos + line_len]);
+            buf_pos += line_len;
+            y += 1;
+        }
+
+        trace!("recv_buffer took {}ms", read_start.elapsed().as_millis());
 
         Ok(())
     }
