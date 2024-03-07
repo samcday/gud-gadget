@@ -279,11 +279,11 @@ impl Function {
 }
 
 impl PixelDataEndpoint {
-    pub fn recv_buffer(&mut self, info: SetBuffer, mut fb: &mut [u8], fb_pitch: usize) -> anyhow::Result<()> {
+    pub fn recv_buffer(&mut self, info: SetBuffer, fb: &mut [u8], fb_pitch: usize) -> anyhow::Result<()> {
         let start = Instant::now();
         let max_packet_size = self.ep_rx.max_packet_size().unwrap();
         // TODO: use pixel format provided in state check
-        let pixel_size = (info.length / info.width / info.height) as usize;
+        let bpp = (info.length / info.width / info.height) as usize;
 
         let len = if info.compression > 0 { info.compressed_length } else { info.length } as usize;
         self.buf.clear();
@@ -319,7 +319,7 @@ impl PixelDataEndpoint {
                 self.compress_buf.resize(info.length as usize - self.compress_buf.capacity(), 0);
             }
             lz4::block::decompress_to_buffer(&self.buf, Some(info.length as i32), &mut self.compress_buf).context("lz4 decompress")?;
-            trace!("decompress buffer took {}ms", read_start.elapsed().as_millis());
+            trace!("decompress buffer took {}ms", decompress_start.elapsed().as_millis());
             &self.compress_buf
         } else {
             &self.buf
@@ -328,8 +328,8 @@ impl PixelDataEndpoint {
         let mut y = info.y as usize;
         let end_y = (info.y + info.height) as usize;
 
-        let line_len = info.width as usize * pixel_size;
-        let line_start = info.x as usize * pixel_size;
+        let line_len = info.width as usize * bpp;
+        let line_start = info.x as usize * bpp;
 
         let mut buf_pos = 0usize;
         while y < end_y {
@@ -340,7 +340,7 @@ impl PixelDataEndpoint {
             y += 1;
         }
 
-        trace!("recv_buffer took {}ms", read_start.elapsed().as_millis());
+        trace!("recv_buffer took {}ms", start.elapsed().as_millis());
 
         Ok(())
     }
