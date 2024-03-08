@@ -137,19 +137,7 @@ fn main() -> anyhow::Result<()> {
                             }
                         })
                         .collect::<Vec<DisplayMode>>();
-                    // req.send_modes(&modes).expect("failed to send modes");
-                    req.send_modes(&[DisplayMode{
-                        clock: 60 * (width as u32) * (height as u32) / 1000,
-                            hdisplay: width,
-                            htotal: width,
-                            hsync_end: width,
-                            hsync_start: width,
-                            vtotal: height,
-                            vdisplay: height,
-                            vsync_end: height,
-                            vsync_start: height,
-                            flags: 0,
-                    }]).expect("failed to send modes");
+                    req.send_modes(&modes).expect("failed to send modes");
                 },
                 Event::Buffer(info) => {
                     gud_data.recv_buffer(info, mapping.as_mut(), pitch as usize).expect("recv_buffer failed");

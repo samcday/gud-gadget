@@ -64,13 +64,13 @@ pub struct PixelDataEndpoint {
 pub struct DisplayMode {
     pub clock: u32,
     pub hdisplay: u16,
-    pub htotal: u16,
-    pub hsync_end: u16,
     pub hsync_start: u16,
-    pub vtotal: u16,
+    pub hsync_end: u16,
+    pub htotal: u16,
     pub vdisplay: u16,
-    pub vsync_end: u16,
     pub vsync_start: u16,
+    pub vsync_end: u16,
+    pub vtotal: u16,
     pub flags: u32
 }
 
