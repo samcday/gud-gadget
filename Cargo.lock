@@ -552,8 +552,7 @@ checksum = "3354b9ac3fae1ff6755cb6db53683adb661634f67557942dea4facebec0fee4b"
 [[package]]
 name = "usb-gadget"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48fe8a35c61dbcdf94cb81f9740fd7cafac9469015bcc4595f1cc5aaa08b5b5f"
+source = "git+https://github.com/surban/usb-gadget.git?rev=897c511#897c511a58357ac011409f75969b5b37a4792a79"
 dependencies = [
  "bitflags",
  "byteorder",

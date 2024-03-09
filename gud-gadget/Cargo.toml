@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-usb-gadget = "0.6.0"
+usb-gadget = { version = "0.6.0", git = "https://github.com/surban/usb-gadget.git", rev = "897c511" }
 serde = { version = "1.0.197", features = ["derive"] }
 tracing = "0.1.40"
 thiserror = "1.0.57"
