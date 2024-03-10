@@ -7,6 +7,7 @@ use drm::control::Device;
 use gud_gadget::{DisplayMode, Event};
 use usb_gadget::{Class, Config, default_udc, Gadget, Id, Strings};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use usb_gadget::function::custom::{Custom, Endpoint, EndpointDirection, Interface};
 
 #[derive(Debug)]
 /// A simple wrapper for a device node.
@@ -77,10 +78,14 @@ fn main() -> anyhow::Result<()> {
 
     usb_gadget::remove_all().expect("UDC init failed");
 
-    let (mut gud, mut gud_data, handle) = gud_gadget::Function::new();
+    let (mut gud_data, ep_dir) = gud_gadget::PixelDataEndpoint::new();
+    let (mut gud, gud_handle) = Custom::builder()
+        .with_interface(Interface::new(Class::vendor_specific(0, 0), "GUD")
+            .with_endpoint(Endpoint::bulk(ep_dir)))
+        .build();
 
     let _reg = Gadget::new(Class::new(255, 255, 3), Id::new(0x1d50, 0x614d), Strings::new("foo", "GUD", "666"))
-        .with_config(Config::new("gud").with_function(handle))
+        .with_config(Config::new("gud").with_function(gud_handle))
         .bind(&udc)
         .expect("UDC binding failed");
 
@@ -112,8 +117,14 @@ fn main() -> anyhow::Result<()> {
     let mut mapping = card.map_dumb_buffer(&mut db).expect("map_dumb_buffer failed");
 
     while running.load(Ordering::Relaxed) {
-        if let Ok(Some(event)) = gud.event(Duration::from_millis(100)) {
-            match event {
+        let event = gud.event_timeout(Duration::from_millis(100)).expect("read GUD event");
+        if event.is_none() {
+            continue;
+        }
+        let event = event.unwrap();
+
+        if let Ok(Some(gud_event)) = gud_gadget::event(event) {
+            match gud_event {
                 Event::GetDescriptorRequest(req) => {
                     req.send_descriptor(min_width, min_height, max_width, max_height).expect("failed to send descriptor");
                 },

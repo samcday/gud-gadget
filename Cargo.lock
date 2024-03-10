@@ -133,6 +133,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gud-drm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ctrlc",
+ "drm",
+ "gud-gadget",
+ "tracing",
+ "tracing-subscriber",
+ "usb-gadget",
+]
+
+[[package]]
 name = "gud-gadget"
 version = "0.1.0"
 dependencies = [
@@ -143,19 +156,6 @@ dependencies = [
  "ssmarshal",
  "thiserror",
  "tracing",
- "usb-gadget",
-]
-
-[[package]]
-name = "gud-gadget-drm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ctrlc",
- "drm",
- "gud-gadget",
- "tracing",
- "tracing-subscriber",
  "usb-gadget",
 ]
 

@@ -3,8 +3,6 @@ name = "gud-gadget"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 usb-gadget = { version = "0.6.0", git = "https://github.com/surban/usb-gadget.git", rev = "897c511" }
 serde = { version = "1.0.197", features = ["derive"] }

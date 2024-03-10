@@ -1,9 +1,9 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace, warn};
 use usb_gadget::Class;
-use usb_gadget::function::custom::{CtrlSender, Custom, Endpoint, EndpointDirection, EndpointReceiver, Interface};
+use usb_gadget::function::custom::{CtrlSender, Custom, CustomBuilder, Endpoint, EndpointDirection, EndpointReceiver, Interface};
 use usb_gadget::function::{custom, Handle};
 use bytes::{Buf, BytesMut};
 
@@ -44,10 +44,6 @@ const GUD_COMPRESSION_LZ4: u8 = 0x01;
 struct ConnectorDescriptor {
     connector_type: u8,
     flags: u32,
-}
-
-pub struct Function {
-    ep0: Custom,
 }
 
 pub struct PixelDataEndpoint {
@@ -158,127 +154,116 @@ struct DisplayDescriptor {
     max_height: u32,
 }
 
-impl Function {
-    pub fn new() -> (Self, PixelDataEndpoint, Handle) {
-        let (ep_rx, ep1_dir) = EndpointDirection::host_to_device();
-        let (ep0, handle) = Custom::builder()
-            .with_interface(Interface::new(Class::vendor_specific(0, 0), "GUD")
-                .with_endpoint(Endpoint::bulk(ep1_dir)))
-            .build();
+pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
+    match event {
+        custom::Event::Enable => {},
+        custom::Event::Bind => {},
+        custom::Event::SetupDeviceToHost(req) => {
+            let ctrl_req = req.ctrl_req();
+            match ctrl_req.request {
+                GUD_REQ_GET_STATUS => {
+                    req.send(&[GUD_STATUS_OK]).context("send status")?;
+                    debug!("sent status");
+                }
+                GUD_REQ_GET_DESCRIPTOR => {
+                    return Ok(Some(Event::GetDescriptorRequest(GetDescriptorRequest { sender: req })));
+                }
+                GUD_REQ_GET_FORMATS => {
+                    req.send(&[
+                        GUD_PIXEL_FORMAT_XRGB8888,
+                        // GUD_PIXEL_FORMAT_RGB565,
+                    ]).context("send pixel formats")?;
+                    debug!("sent pixel formats");
+                }
+                GUD_REQ_GET_PROPERTIES => {
+                    let sent = req.send(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).context("send properties")?;
+                    debug!("sent properties {}", sent);
+                }
+                GUD_REQ_GET_CONNECTORS => {
+                    let connectors = [ConnectorDescriptor {
+                        connector_type: GUD_CONNECTOR_TYPE_PANEL,
+                        flags: 0,
+                    }];
+
+                    let mut buf: [u8; 5] = [0; 5];
+                    ssmarshal::serialize(&mut buf, &connectors).context("serialize connectors")?;
+                    req.send(&buf).context("send connectors")?;
+                    debug!("sent connectors");
+                }
+                GUD_REQ_GET_CONNECTOR_PROPERTIES => {
+                    req.send(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).context("send connector properties")?;
+                    debug!("sent connector properties");
+                }
+                GUD_REQ_GET_CONNECTOR_MODES => {
+                    return Ok(Some(Event::GetDisplayModesRequest(GetDisplayModesRequest { sender: req })));
+                }
+                GUD_REQ_GET_CONNECTOR_EDID => {
+                    req.send(&[0]).context("send EDIDs")?;
+                    debug!("sent EDIDs");
+                }
+                GUD_REQ_GET_CONNECTOR_STATUS => {
+                    req.send(&[GUD_CONNECTOR_STATUS_CONNECTED]).context("send connector status")?;
+                    debug!("sent connector status");
+                }
+                req => {
+                    warn!("unhandled SetupDeviceToHost request {:x}", req);
+                }
+            }
+        },
+        custom::Event::SetupHostToDevice(req) => {
+            let ctrl_req = req.ctrl_req();
+            match ctrl_req.request {
+                GUD_REQ_SET_CONNECTOR_FORCE_DETECT => {
+                    debug!("connector set to {}", ctrl_req.value);
+                    req.recv_all().context("recv set connector")?;
+                }
+                GUD_REQ_SET_STATE_CHECK => {
+                    debug!("received state check");
+                    req.recv_all().context("recv set state check")?;
+                }
+                GUD_REQ_SET_CONTROLLER_ENABLE => {
+                    let req = req.recv_all().context("recv set controller enable")?;
+                    debug!("received controller enable: {:?}", req);
+                }
+                GUD_REQ_SET_DISPLAY_ENABLE => {
+                    let req = req.recv_all().context("recv set display enable")?;
+                    debug!("received display enable: {:?}", req);
+                }
+                GUD_REQ_SET_STATE_COMMIT => {
+                    req.recv_all().context("recv set state commit")?;
+                    debug!("received state commit");
+                }
+                GUD_REQ_SET_BUFFER => {
+                    let req = req.recv_all().context("recv set buffer")?;
+                    let v: SetBuffer;
+                    (v, _) = ssmarshal::deserialize(req.as_slice()).context("deserialize set buffer")?;
+                    debug!("received set buffer: {:?}", v);
+                    return Ok(Some(Event::Buffer(v)))
+                }
+                v => {
+                    warn!("unhandled set request {:x}", v);
+                },
+            }
+        },
+        event => {
+            warn!("unhandled event {:?}", event);
+        }
+    }
+    Ok(None)
+}
+
+impl PixelDataEndpoint {
+    pub fn new() -> (Self, EndpointDirection) {
+        let (ep_rx, ep_dir) = EndpointDirection::host_to_device();
 
         (Self {
-            ep0,
-        }, PixelDataEndpoint {
             ep_rx,
             ep_buf: Vec::new(),
             buf: BytesMut::new(),
             compress_buf: BytesMut::new(),
-        }, handle)
+        }, ep_dir)
     }
 
-    pub fn event(&mut self, timeout: Duration) -> anyhow::Result<Option<Event>> {
-        if let Some(event) = self.ep0.event_timeout(timeout)? {
-            trace!("received event {:?}", event);
-            match event {
-                custom::Event::Enable => {},
-                custom::Event::Bind => {},
-                custom::Event::SetupDeviceToHost(req) => {
-                    let ctrl_req = req.ctrl_req();
-                    match ctrl_req.request {
-                        GUD_REQ_GET_STATUS => {
-                            req.send(&[GUD_STATUS_OK]).context("send status")?;
-                            debug!("sent status");
-                        }
-                        GUD_REQ_GET_DESCRIPTOR => {
-                            return Ok(Some(Event::GetDescriptorRequest(GetDescriptorRequest { sender: req })));
-                        }
-                        GUD_REQ_GET_FORMATS => {
-                            req.send(&[
-                                // GUD_PIXEL_FORMAT_XRGB8888,
-                                GUD_PIXEL_FORMAT_RGB565,
-                            ]).context("send pixel formats")?;
-                            debug!("sent pixel formats");
-                        }
-                        GUD_REQ_GET_PROPERTIES => {
-                            let sent = req.send(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).context("send properties")?;
-                            debug!("sent properties {}", sent);
-                        }
-                        GUD_REQ_GET_CONNECTORS => {
-                            let connectors = [ConnectorDescriptor {
-                                connector_type: GUD_CONNECTOR_TYPE_PANEL,
-                                flags: 0,
-                            }];
-
-                            let mut buf: [u8; 5] = [0; 5];
-                            ssmarshal::serialize(&mut buf, &connectors).context("serialize connectors")?;
-                            req.send(&buf).context("send connectors")?;
-                            debug!("sent connectors");
-                        }
-                        GUD_REQ_GET_CONNECTOR_PROPERTIES => {
-                            req.send(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).context("send connector properties")?;
-                            debug!("sent connector properties");
-                        }
-                        GUD_REQ_GET_CONNECTOR_MODES => {
-                            return Ok(Some(Event::GetDisplayModesRequest(GetDisplayModesRequest { sender: req })));
-                        }
-                        GUD_REQ_GET_CONNECTOR_EDID => {
-                            req.send(&[0]).context("send EDIDs")?;
-                            debug!("sent EDIDs");
-                        }
-                        GUD_REQ_GET_CONNECTOR_STATUS => {
-                            req.send(&[GUD_CONNECTOR_STATUS_CONNECTED]).context("send connector status")?;
-                            debug!("sent connector status");
-                        }
-                        req => {
-                            warn!("unhandled SetupDeviceToHost request {:x}", req);
-                        }
-                    }
-                },
-                custom::Event::SetupHostToDevice(req) => {
-                    let ctrl_req = req.ctrl_req();
-                    match ctrl_req.request {
-                        GUD_REQ_SET_CONNECTOR_FORCE_DETECT => {
-                            debug!("connector set to {}", ctrl_req.value);
-                            req.recv_all().context("recv set connector")?;
-                        }
-                        GUD_REQ_SET_STATE_CHECK => {
-                            debug!("received state check");
-                            req.recv_all().context("recv set state check")?;
-                        }
-                        GUD_REQ_SET_CONTROLLER_ENABLE => {
-                            let req = req.recv_all().context("recv set controller enable")?;
-                            debug!("received controller enable: {:?}", req);
-                        }
-                        GUD_REQ_SET_DISPLAY_ENABLE => {
-                            let req = req.recv_all().context("recv set display enable")?;
-                            debug!("received display enable: {:?}", req);
-                        }
-                        GUD_REQ_SET_STATE_COMMIT => {
-                            req.recv_all().context("recv set state commit")?;
-                            debug!("received state commit");
-                        }
-                        GUD_REQ_SET_BUFFER => {
-                            let req = req.recv_all().context("recv set buffer")?;
-                            let v: SetBuffer;
-                            (v, _) = ssmarshal::deserialize(req.as_slice()).context("deserialize set buffer")?;
-                            debug!("received set buffer: {:?}", v);
-                            return Ok(Some(Event::Buffer(v)))
-                        }
-                        v => {
-                            warn!("unhandled set request {:x}", v);
-                        },
-                    }
-                },
-                event => {
-                    warn!("unhandled event {:?}", event);
-                }
-            }
-        }
-        Ok(None)
-    }
-}
-
-impl PixelDataEndpoint {
     pub fn recv_buffer(&mut self, info: SetBuffer, fb: &mut [u8], fb_pitch: usize) -> anyhow::Result<()> {
         let start = Instant::now();
         let max_packet_size = self.ep_rx.max_packet_size().unwrap();

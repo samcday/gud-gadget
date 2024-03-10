@@ -1,14 +1,12 @@
 [package]
-name = "gud-gadget-drm"
+name = "gud-drm"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 ctrlc = "3.4.2"
 drm = "0.11.1"
-gud-gadget = {path = "../gud-gadget"}
+gud-gadget = { path = "../gadget" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 usb-gadget = { version = "0.6.0", git = "https://github.com/surban/usb-gadget.git", rev = "897c511" }
 tracing = "0.1.40"
