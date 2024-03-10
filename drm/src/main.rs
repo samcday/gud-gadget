@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use usb_gadget::function::custom::{Custom, Endpoint, Interface};
-use usb_gadget::{default_udc, Class, Config, Gadget, Id, Strings};
+use usb_gadget::{default_udc, Class, Config, Gadget, Strings};
 
 #[derive(Debug)]
 /// A simple wrapper for a device node.
@@ -98,15 +98,15 @@ fn main() -> anyhow::Result<()> {
     let (mut gud_data, ep_dir) = gud_gadget::PixelDataEndpoint::new();
     let (mut gud, gud_handle) = Custom::builder()
         .with_interface(
-            Interface::new(Class::vendor_specific(0, 0), "GUD")
+            Interface::new(Class::interface_specific(), "GUD")
                 .with_endpoint(Endpoint::bulk(ep_dir)),
         )
         .build();
 
     let _reg = Gadget::new(
-        Class::new(255, 255, 3),
-        Id::new(0x1d50, 0x614d),
-        Strings::new("foo", "GUD", "666"),
+        Class::interface_specific(),
+        gud_gadget::OPENMOKO_GUD_ID,
+        Strings::new("The Internet", "Generic USB Display", ""),
     )
     .with_config(Config::new("gud").with_function(gud_handle))
     .bind(&udc)

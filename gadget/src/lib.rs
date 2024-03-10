@@ -6,6 +6,7 @@ use tracing::{debug, trace, warn};
 use bytes::BytesMut;
 use usb_gadget::function::custom;
 use usb_gadget::function::custom::{CtrlSender, EndpointDirection, EndpointReceiver};
+use usb_gadget::Id;
 
 const GUD_DISPLAY_MAGIC: u32 = 0x1d50614d;
 
@@ -39,6 +40,9 @@ const GUD_CONNECTOR_TYPE_PANEL: u8 = 0;
 const GUD_STATUS_OK: u8 = 0;
 
 const GUD_COMPRESSION_LZ4: u8 = 0x01;
+
+// https://github.com/openmoko/openmoko-usb-oui/commit/73bdf541b6f9840b70219626b4088d4e3f164904
+pub const OPENMOKO_GUD_ID: Id = Id::new(0x1d50, 0x614d);
 
 #[derive(Serialize)]
 struct ConnectorDescriptor {
