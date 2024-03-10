@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use usb_gadget::function::custom::{Custom, Endpoint, Interface};
+use usb_gadget::function::custom::{Custom, Interface};
 use usb_gadget::{default_udc, Class, Config, Gadget, Strings};
 
 #[derive(Debug)]
@@ -95,11 +95,10 @@ fn main() -> anyhow::Result<()> {
 
     usb_gadget::remove_all().expect("UDC init failed");
 
-    let (mut gud_data, ep_dir) = gud_gadget::PixelDataEndpoint::new();
+    let (mut gud_data, gud_data_ep) = gud_gadget::PixelDataEndpoint::new();
     let (mut gud, gud_handle) = Custom::builder()
         .with_interface(
-            Interface::new(Class::interface_specific(), "GUD")
-                .with_endpoint(Endpoint::bulk(ep_dir)),
+            Interface::new(Class::interface_specific(), "GUD").with_endpoint(gud_data_ep),
         )
         .build();
 

@@ -5,7 +5,7 @@ use tracing::{debug, trace, warn};
 
 use bytes::BytesMut;
 use usb_gadget::function::custom;
-use usb_gadget::function::custom::{CtrlSender, EndpointDirection, EndpointReceiver};
+use usb_gadget::function::custom::{CtrlSender, Endpoint, EndpointDirection, EndpointReceiver};
 use usb_gadget::Id;
 
 const GUD_DISPLAY_MAGIC: u32 = 0x1d50614d;
@@ -273,7 +273,7 @@ pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
 }
 
 impl PixelDataEndpoint {
-    pub fn new() -> (Self, EndpointDirection) {
+    pub fn new() -> (Self, Endpoint) {
         let (ep_rx, ep_dir) = EndpointDirection::host_to_device();
 
         (
@@ -283,7 +283,7 @@ impl PixelDataEndpoint {
                 buf: BytesMut::new(),
                 compress_buf: BytesMut::new(),
             },
-            ep_dir,
+            Endpoint::bulk(ep_dir),
         )
     }
 
