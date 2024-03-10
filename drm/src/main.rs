@@ -1,13 +1,13 @@
-use std::env::args;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use drm::buffer::Buffer;
 use drm::control::Device;
 use gud_gadget::{DisplayMode, Event};
-use usb_gadget::{Class, Config, default_udc, Gadget, Id, Strings};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-use usb_gadget::function::custom::{Custom, Endpoint, EndpointDirection, Interface};
+use std::env::args;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use usb_gadget::function::custom::{Custom, Endpoint, Interface};
+use usb_gadget::{default_udc, Class, Config, Gadget, Id, Strings};
 
 #[derive(Debug)]
 /// A simple wrapper for a device node.
@@ -45,18 +45,27 @@ fn main() -> anyhow::Result<()> {
         .with(EnvFilter::from_default_env())
         .init();
 
-    let card_path = args().skip(1).next().expect("specify full path to /dev/dri/cardN as program argument");
+    let card_path = args()
+        .skip(1)
+        .next()
+        .expect("specify full path to /dev/dri/cardN as program argument");
     let card = Card::open(&card_path);
     let udc = default_udc().expect("no UDC found");
 
     let resources = card.resource_handles().expect("load drm resources failed");
 
-    let connector = resources.connectors().iter()
-        .map(|h| card.get_connector(*h, false).expect("get drm connector failed"))
+    let connector = resources
+        .connectors()
+        .iter()
+        .map(|h| {
+            card.get_connector(*h, false)
+                .expect("get drm connector failed")
+        })
         .find(|c| c.state() == drm::control::connector::State::Connected)
         .expect("no connected connectors found");
 
-    let crtc = resources.crtcs()
+    let crtc = resources
+        .crtcs()
         .iter()
         .flat_map(|crtc| card.get_crtc(*crtc))
         .next()
@@ -70,31 +79,46 @@ fn main() -> anyhow::Result<()> {
         let (width, height) = mode.size();
         let width = width as u32;
         let height = height as u32;
-        if width < min_width { min_width = width }
-        if width > max_width { max_width = width }
-        if height < min_height { min_height = height }
-        if height > max_height { max_height = height }
+        if width < min_width {
+            min_width = width
+        }
+        if width > max_width {
+            max_width = width
+        }
+        if height < min_height {
+            min_height = height
+        }
+        if height > max_height {
+            max_height = height
+        }
     }
 
     usb_gadget::remove_all().expect("UDC init failed");
 
     let (mut gud_data, ep_dir) = gud_gadget::PixelDataEndpoint::new();
     let (mut gud, gud_handle) = Custom::builder()
-        .with_interface(Interface::new(Class::vendor_specific(0, 0), "GUD")
-            .with_endpoint(Endpoint::bulk(ep_dir)))
+        .with_interface(
+            Interface::new(Class::vendor_specific(0, 0), "GUD")
+                .with_endpoint(Endpoint::bulk(ep_dir)),
+        )
         .build();
 
-    let _reg = Gadget::new(Class::new(255, 255, 3), Id::new(0x1d50, 0x614d), Strings::new("foo", "GUD", "666"))
-        .with_config(Config::new("gud").with_function(gud_handle))
-        .bind(&udc)
-        .expect("UDC binding failed");
+    let _reg = Gadget::new(
+        Class::new(255, 255, 3),
+        Id::new(0x1d50, 0x614d),
+        Strings::new("foo", "GUD", "666"),
+    )
+    .with_config(Config::new("gud").with_function(gud_handle))
+    .bind(&udc)
+    .expect("UDC binding failed");
 
     let running = Arc::new(AtomicBool::new(true));
 
     let r = running.clone();
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
-    }).expect("cleanup handler registration failed");
+    })
+    .expect("cleanup handler registration failed");
 
     let mode = connector.modes().first().unwrap();
 
@@ -103,21 +127,35 @@ fn main() -> anyhow::Result<()> {
     let (width, height) = mode.size();
     let mut db = card
         // .create_dumb_buffer((width.into(), height.into()), drm::buffer::DrmFourcc::Xrgb8888, 32)
-        .create_dumb_buffer((width.into(), height.into()), drm::buffer::DrmFourcc::Rgb565, 16)
+        .create_dumb_buffer(
+            (width.into(), height.into()),
+            drm::buffer::DrmFourcc::Rgb565,
+            16,
+        )
         .expect("Could not create dumb buffer");
 
     let fb = card
         .add_framebuffer(&db, 16, 16)
         .expect("Could not create FB");
-    card.set_crtc(crtc.handle(), Some(fb), (0, 0), &[connector.handle()], Some(*mode))
-        .expect("Could not set CRTC");
+    card.set_crtc(
+        crtc.handle(),
+        Some(fb),
+        (0, 0),
+        &[connector.handle()],
+        Some(*mode),
+    )
+    .expect("Could not set CRTC");
 
     let pitch = db.pitch();
 
-    let mut mapping = card.map_dumb_buffer(&mut db).expect("map_dumb_buffer failed");
+    let mut mapping = card
+        .map_dumb_buffer(&mut db)
+        .expect("map_dumb_buffer failed");
 
     while running.load(Ordering::Relaxed) {
-        let event = gud.event_timeout(Duration::from_millis(100)).expect("read GUD event");
+        let event = gud
+            .event_timeout(Duration::from_millis(100))
+            .expect("read GUD event");
         if event.is_none() {
             continue;
         }
@@ -126,10 +164,14 @@ fn main() -> anyhow::Result<()> {
         if let Ok(Some(gud_event)) = gud_gadget::event(event) {
             match gud_event {
                 Event::GetDescriptorRequest(req) => {
-                    req.send_descriptor(min_width, min_height, max_width, max_height).expect("failed to send descriptor");
-                },
+                    req.send_descriptor(min_width, min_height, max_width, max_height)
+                        .expect("failed to send descriptor");
+                }
                 Event::GetDisplayModesRequest(req) => {
-                    let modes = card.get_modes(connector.handle()).unwrap().iter()
+                    let modes = card
+                        .get_modes(connector.handle())
+                        .unwrap()
+                        .iter()
                         .map(|mode| {
                             let (hdisplay, vdisplay) = mode.size();
                             let (hsync_start, hsync_end, htotal) = mode.hsync();
@@ -149,9 +191,11 @@ fn main() -> anyhow::Result<()> {
                         })
                         .collect::<Vec<DisplayMode>>();
                     req.send_modes(&modes).expect("failed to send modes");
-                },
+                }
                 Event::Buffer(info) => {
-                    gud_data.recv_buffer(info, mapping.as_mut(), pitch as usize).expect("recv_buffer failed");
+                    gud_data
+                        .recv_buffer(info, mapping.as_mut(), pitch as usize)
+                        .expect("recv_buffer failed");
                 }
             }
         }

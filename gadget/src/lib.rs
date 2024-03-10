@@ -1,11 +1,11 @@
-use std::time::Instant;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 use tracing::{debug, trace, warn};
-use usb_gadget::Class;
-use usb_gadget::function::custom::{CtrlSender, Custom, CustomBuilder, Endpoint, EndpointDirection, EndpointReceiver, Interface};
-use usb_gadget::function::{custom, Handle};
-use bytes::{Buf, BytesMut};
+
+use bytes::BytesMut;
+use usb_gadget::function::custom;
+use usb_gadget::function::custom::{CtrlSender, EndpointDirection, EndpointReceiver};
 
 const GUD_DISPLAY_MAGIC: u32 = 0x1d50614d;
 
@@ -67,7 +67,7 @@ pub struct DisplayMode {
     pub vsync_start: u16,
     pub vsync_end: u16,
     pub vtotal: u16,
-    pub flags: u32
+    pub flags: u32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -90,7 +90,7 @@ pub enum Event<'a> {
 
 #[derive(Debug)]
 pub struct GetDescriptorRequest<'a> {
-    sender: CtrlSender<'a>
+    sender: CtrlSender<'a>,
 }
 
 #[derive(Debug)]
@@ -99,7 +99,13 @@ pub struct GetDisplayModesRequest<'a> {
 }
 
 impl<'a> GetDescriptorRequest<'a> {
-    pub fn send_descriptor(self, min_width: u32, min_height: u32, max_width: u32, max_height: u32) -> anyhow::Result<()> {
+    pub fn send_descriptor(
+        self,
+        min_width: u32,
+        min_height: u32,
+        max_width: u32,
+        max_height: u32,
+    ) -> anyhow::Result<()> {
         let descriptor = DisplayDescriptor {
             magic: GUD_DISPLAY_MAGIC,
             version: 1,
@@ -156,8 +162,8 @@ struct DisplayDescriptor {
 
 pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
     match event {
-        custom::Event::Enable => {},
-        custom::Event::Bind => {},
+        custom::Event::Enable => {}
+        custom::Event::Bind => {}
         custom::Event::SetupDeviceToHost(req) => {
             let ctrl_req = req.ctrl_req();
             match ctrl_req.request {
@@ -166,17 +172,22 @@ pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
                     debug!("sent status");
                 }
                 GUD_REQ_GET_DESCRIPTOR => {
-                    return Ok(Some(Event::GetDescriptorRequest(GetDescriptorRequest { sender: req })));
+                    return Ok(Some(Event::GetDescriptorRequest(GetDescriptorRequest {
+                        sender: req,
+                    })));
                 }
                 GUD_REQ_GET_FORMATS => {
                     req.send(&[
                         GUD_PIXEL_FORMAT_XRGB8888,
                         // GUD_PIXEL_FORMAT_RGB565,
-                    ]).context("send pixel formats")?;
+                    ])
+                    .context("send pixel formats")?;
                     debug!("sent pixel formats");
                 }
                 GUD_REQ_GET_PROPERTIES => {
-                    let sent = req.send(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).context("send properties")?;
+                    let sent = req
+                        .send(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                        .context("send properties")?;
                     debug!("sent properties {}", sent);
                 }
                 GUD_REQ_GET_CONNECTORS => {
@@ -191,25 +202,29 @@ pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
                     debug!("sent connectors");
                 }
                 GUD_REQ_GET_CONNECTOR_PROPERTIES => {
-                    req.send(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).context("send connector properties")?;
+                    req.send(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                        .context("send connector properties")?;
                     debug!("sent connector properties");
                 }
                 GUD_REQ_GET_CONNECTOR_MODES => {
-                    return Ok(Some(Event::GetDisplayModesRequest(GetDisplayModesRequest { sender: req })));
+                    return Ok(Some(Event::GetDisplayModesRequest(
+                        GetDisplayModesRequest { sender: req },
+                    )));
                 }
                 GUD_REQ_GET_CONNECTOR_EDID => {
                     req.send(&[0]).context("send EDIDs")?;
                     debug!("sent EDIDs");
                 }
                 GUD_REQ_GET_CONNECTOR_STATUS => {
-                    req.send(&[GUD_CONNECTOR_STATUS_CONNECTED]).context("send connector status")?;
+                    req.send(&[GUD_CONNECTOR_STATUS_CONNECTED])
+                        .context("send connector status")?;
                     debug!("sent connector status");
                 }
                 req => {
                     warn!("unhandled SetupDeviceToHost request {:x}", req);
                 }
             }
-        },
+        }
         custom::Event::SetupHostToDevice(req) => {
             let ctrl_req = req.ctrl_req();
             match ctrl_req.request {
@@ -236,15 +251,16 @@ pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
                 GUD_REQ_SET_BUFFER => {
                     let req = req.recv_all().context("recv set buffer")?;
                     let v: SetBuffer;
-                    (v, _) = ssmarshal::deserialize(req.as_slice()).context("deserialize set buffer")?;
+                    (v, _) =
+                        ssmarshal::deserialize(req.as_slice()).context("deserialize set buffer")?;
                     debug!("received set buffer: {:?}", v);
-                    return Ok(Some(Event::Buffer(v)))
+                    return Ok(Some(Event::Buffer(v)));
                 }
                 v => {
                     warn!("unhandled set request {:x}", v);
-                },
+                }
             }
-        },
+        }
         event => {
             warn!("unhandled event {:?}", event);
         }
@@ -256,21 +272,33 @@ impl PixelDataEndpoint {
     pub fn new() -> (Self, EndpointDirection) {
         let (ep_rx, ep_dir) = EndpointDirection::host_to_device();
 
-        (Self {
-            ep_rx,
-            ep_buf: Vec::new(),
-            buf: BytesMut::new(),
-            compress_buf: BytesMut::new(),
-        }, ep_dir)
+        (
+            Self {
+                ep_rx,
+                ep_buf: Vec::new(),
+                buf: BytesMut::new(),
+                compress_buf: BytesMut::new(),
+            },
+            ep_dir,
+        )
     }
 
-    pub fn recv_buffer(&mut self, info: SetBuffer, fb: &mut [u8], fb_pitch: usize) -> anyhow::Result<()> {
+    pub fn recv_buffer(
+        &mut self,
+        info: SetBuffer,
+        fb: &mut [u8],
+        fb_pitch: usize,
+    ) -> anyhow::Result<()> {
         let start = Instant::now();
         let max_packet_size = self.ep_rx.max_packet_size().unwrap();
         // TODO: use pixel format provided in state check
         let bpp = (info.length / info.width / info.height) as usize;
 
-        let len = if info.compression > 0 { info.compressed_length } else { info.length } as usize;
+        let len = if info.compression > 0 {
+            info.compressed_length
+        } else {
+            info.length
+        } as usize;
         self.buf.clear();
 
         // Ensure the buffer is large enough to fit all incoming data.
@@ -281,7 +309,10 @@ impl PixelDataEndpoint {
         // Read the incoming data fully into the buffer.
         let read_start = Instant::now();
         while self.buf.len() < len {
-            let buf = self.ep_buf.pop().unwrap_or_else(|| BytesMut::with_capacity(max_packet_size));
+            let buf = self
+                .ep_buf
+                .pop()
+                .unwrap_or_else(|| BytesMut::with_capacity(max_packet_size));
             let buf = self.ep_rx.recv(buf).context("read bulk ep")?;
             if buf.is_none() {
                 continue;
@@ -301,10 +332,19 @@ impl PixelDataEndpoint {
         let buf = if info.compression > 0 {
             let decompress_start = Instant::now();
             if self.compress_buf.len() < info.length as usize {
-                self.compress_buf.resize(info.length as usize - self.compress_buf.capacity(), 0);
+                self.compress_buf
+                    .resize(info.length as usize - self.compress_buf.capacity(), 0);
             }
-            lz4::block::decompress_to_buffer(&self.buf, Some(info.length as i32), &mut self.compress_buf).context("lz4 decompress")?;
-            trace!("decompress buffer took {}ms", decompress_start.elapsed().as_millis());
+            lz4::block::decompress_to_buffer(
+                &self.buf,
+                Some(info.length as i32),
+                &mut self.compress_buf,
+            )
+            .context("lz4 decompress")?;
+            trace!(
+                "decompress buffer took {}ms",
+                decompress_start.elapsed().as_millis()
+            );
             &self.compress_buf
         } else {
             &self.buf
