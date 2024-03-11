@@ -23,6 +23,7 @@ impl std::os::unix::io::AsFd for Card {
 
 /// With `AsFd` implemented, we can now implement `drm::Device`.
 impl drm::Device for Card {}
+
 impl Device for Card {}
 
 /// Simple helper methods for opening a `Card`.
@@ -98,7 +99,8 @@ fn main() -> anyhow::Result<()> {
     let (mut gud_data, gud_data_ep) = gud_gadget::PixelDataEndpoint::new();
     let (mut gud, gud_handle) = Custom::builder()
         .with_interface(
-            Interface::new(Class::interface_specific(), "GUD").with_endpoint(gud_data_ep),
+            Interface::new(Class::vendor_specific(Class::VENDOR_SPECIFIC, 0), "GUD")
+                .with_endpoint(gud_data_ep),
         )
         .build();
 
