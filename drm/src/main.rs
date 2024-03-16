@@ -164,11 +164,14 @@ fn main() -> anyhow::Result<()> {
 
         if let Ok(Some(gud_event)) = gud_gadget::event(event) {
             match gud_event {
-                Event::GetDescriptorRequest(req) => {
+                Event::GetDescriptor(req) => {
                     req.send_descriptor(min_width, min_height, max_width, max_height)
                         .expect("failed to send descriptor");
                 }
-                Event::GetDisplayModesRequest(req) => {
+                Event::GetPixelFormats(req) => {
+                    req.send_pixel_formats(&[gud_gadget::GUD_PIXEL_FORMAT_RGB565]).unwrap()
+                }
+                Event::GetDisplayModes(req) => {
                     let modes = card
                         .get_modes(connector.handle())
                         .unwrap()
@@ -195,7 +198,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 Event::Buffer(info) => {
                     gud_data
-                        .recv_buffer(info, mapping.as_mut(), pitch as usize)
+                        .recv_buffer(info, mapping.as_mut(), pitch as usize, 2)
                         .expect("recv_buffer failed");
                 }
             }

@@ -31,9 +31,9 @@ const GUD_DISPLAY_FLAG_FULL_UPDATE: u32 = 0x02;
 
 const GUD_CONNECTOR_STATUS_CONNECTED: u8 = 0x01;
 
-const GUD_PIXEL_FORMAT_RGB565: u8 = 0x40;
-const GUD_PIXEL_FORMAT_RGB888: u8 = 0x50;
-const GUD_PIXEL_FORMAT_XRGB8888: u8 = 0x80;
+pub const GUD_PIXEL_FORMAT_RGB565: u8 = 0x40;
+pub const GUD_PIXEL_FORMAT_RGB888: u8 = 0x50;
+pub const GUD_PIXEL_FORMAT_XRGB8888: u8 = 0x80;
 
 const GUD_CONNECTOR_TYPE_PANEL: u8 = 0;
 
@@ -87,22 +87,28 @@ pub struct SetBuffer {
 
 #[derive(Debug)]
 pub enum Event<'a> {
-    GetDescriptorRequest(GetDescriptorRequest<'a>),
-    GetDisplayModesRequest(GetDisplayModesRequest<'a>),
+    GetDescriptor(GetDescriptor<'a>),
+    GetDisplayModes(GetDisplayModes<'a>),
+    GetPixelFormats(GetPixelFormats<'a>),
     Buffer(SetBuffer),
 }
 
 #[derive(Debug)]
-pub struct GetDescriptorRequest<'a> {
+pub struct GetDescriptor<'a> {
     sender: CtrlSender<'a>,
 }
 
 #[derive(Debug)]
-pub struct GetDisplayModesRequest<'a> {
+pub struct GetDisplayModes<'a> {
     sender: CtrlSender<'a>,
 }
 
-impl<'a> GetDescriptorRequest<'a> {
+#[derive(Debug)]
+pub struct GetPixelFormats<'a> {
+    sender: CtrlSender<'a>,
+}
+
+impl<'a> GetDescriptor<'a> {
     pub fn send_descriptor(
         self,
         min_width: u32,
@@ -131,7 +137,7 @@ impl<'a> GetDescriptorRequest<'a> {
     }
 }
 
-impl<'a> GetDisplayModesRequest<'a> {
+impl<'a> GetDisplayModes<'a> {
     pub fn send_modes(self, modes: &[DisplayMode]) -> anyhow::Result<()> {
         let size = 24 * modes.len();
         if size > self.sender.len() {
@@ -147,6 +153,14 @@ impl<'a> GetDisplayModesRequest<'a> {
 
         self.sender.send(&buf).context("send modes")?;
 
+        Ok(())
+    }
+}
+
+impl <'a> GetPixelFormats<'a> {
+    pub fn send_pixel_formats(self, formats: &[u8]) -> anyhow::Result<()> {
+        self.sender.send(formats).context("send pixel formats")?;
+        debug!("sent pixel formats: {:?}", formats);
         Ok(())
     }
 }
@@ -176,17 +190,14 @@ pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
                     debug!("sent status");
                 }
                 GUD_REQ_GET_DESCRIPTOR => {
-                    return Ok(Some(Event::GetDescriptorRequest(GetDescriptorRequest {
+                    return Ok(Some(Event::GetDescriptor(GetDescriptor {
                         sender: req,
                     })));
                 }
                 GUD_REQ_GET_FORMATS => {
-                    req.send(&[
-                        GUD_PIXEL_FORMAT_XRGB8888,
-                        // GUD_PIXEL_FORMAT_RGB565,
-                    ])
-                    .context("send pixel formats")?;
-                    debug!("sent pixel formats");
+                    return Ok(Some(Event::GetPixelFormats(GetPixelFormats {
+                        sender: req,
+                    })));
                 }
                 GUD_REQ_GET_PROPERTIES => {
                     let sent = req
@@ -211,8 +222,8 @@ pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
                     debug!("sent connector properties");
                 }
                 GUD_REQ_GET_CONNECTOR_MODES => {
-                    return Ok(Some(Event::GetDisplayModesRequest(
-                        GetDisplayModesRequest { sender: req },
+                    return Ok(Some(Event::GetDisplayModes(
+                        GetDisplayModes { sender: req },
                     )));
                 }
                 GUD_REQ_GET_CONNECTOR_EDID => {
@@ -292,11 +303,10 @@ impl PixelDataEndpoint {
         info: SetBuffer,
         fb: &mut [u8],
         fb_pitch: usize,
+        bpp: usize,
     ) -> anyhow::Result<()> {
         let start = Instant::now();
         let max_packet_size = self.ep_rx.max_packet_size().unwrap();
-        // TODO: use pixel format provided in state check
-        let bpp = (info.length / info.width / info.height) as usize;
 
         let len = if info.compression > 0 {
             info.compressed_length
