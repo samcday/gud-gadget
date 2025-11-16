@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -47,8 +47,11 @@ struct ConnectorDescriptor {
     flags: u32,
 }
 
-#[derive(Debug, Serialize)]
-pub struct DisplayMode {
+pub const GUD_DISPLAY_MODE_FLAG_PREFERRED: u32 = 1 << 10;
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+pub struct GudDisplayMode {
     pub clock: u32,
     pub hdisplay: u16,
     pub hsync_start: u16,
@@ -59,6 +62,25 @@ pub struct DisplayMode {
     pub vsync_end: u16,
     pub vtotal: u16,
     pub flags: u32,
+}
+
+impl GudDisplayMode {
+    pub const SIZE: usize = 24;
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[0..4].copy_from_slice(&self.clock.to_le_bytes());
+        buf[4..6].copy_from_slice(&self.hdisplay.to_le_bytes());
+        buf[6..8].copy_from_slice(&self.hsync_start.to_le_bytes());
+        buf[8..10].copy_from_slice(&self.hsync_end.to_le_bytes());
+        buf[10..12].copy_from_slice(&self.htotal.to_le_bytes());
+        buf[12..14].copy_from_slice(&self.vdisplay.to_le_bytes());
+        buf[14..16].copy_from_slice(&self.vsync_start.to_le_bytes());
+        buf[16..18].copy_from_slice(&self.vsync_end.to_le_bytes());
+        buf[18..20].copy_from_slice(&self.vtotal.to_le_bytes());
+        buf[20..24].copy_from_slice(&self.flags.to_le_bytes());
+        buf
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -268,6 +290,7 @@ pub enum Event<'a> {
     GetDescriptor(GetDescriptor<'a>),
     GetDisplayModes(GetDisplayModes<'a>),
     GetPixelFormats(GetPixelFormats<'a>),
+    GetEdid(GetEdid<'a>),
     Buffer(SetBuffer),
 }
 
@@ -279,6 +302,13 @@ pub struct GetDescriptor<'a> {
 #[derive(Debug)]
 pub struct GetDisplayModes<'a> {
     sender: CtrlSender<'a>,
+    connector: u16,
+}
+
+#[derive(Debug)]
+pub struct GetEdid<'a> {
+    sender: CtrlSender<'a>,
+    connector: u16,
 }
 
 #[derive(Debug)]
@@ -316,20 +346,31 @@ impl<'a> GetDescriptor<'a> {
 }
 
 impl<'a> GetDisplayModes<'a> {
-    pub fn send_modes(self, modes: &[DisplayMode]) -> anyhow::Result<()> {
-        let size = 24 * modes.len();
+    pub fn connector(&self) -> u16 {
+        self.connector
+    }
+
+    pub fn max_len(&self) -> usize {
+        self.sender.len()
+    }
+
+    pub fn send_modes(self, modes: &[GudDisplayMode]) -> anyhow::Result<()> {
+        let size = GudDisplayMode::SIZE * modes.len();
         if size > self.sender.len() {
-            // TODO: proper Err
-            panic!("too many display modes provided");
+            return Err(anyhow!("insufficient buffer for modes"));
         }
 
-        let mut buf = vec![0; size];
-        let mut pos = 0;
+        let connector = self.connector;
+        let mut buf = Vec::with_capacity(size);
         for mode in modes {
-            pos = pos + ssmarshal::serialize(&mut buf[pos..], mode).context("serialize mode")?;
+            buf.extend_from_slice(&mode.to_bytes());
         }
-
         self.sender.send(&buf).context("send modes")?;
+        debug!(
+            "sent {} display modes for connector {}",
+            modes.len(),
+            connector
+        );
 
         Ok(())
     }
@@ -361,8 +402,8 @@ pub fn event(event: FunctionfsEvent) -> anyhow::Result<Option<Event>> {
         FunctionfsEvent::Enable => {}
         FunctionfsEvent::Bind => {}
         FunctionfsEvent::SetupDeviceToHost(req) => {
-            let ctrl_req = req.ctrl_req();
-            match ctrl_req.request {
+            let request = req.ctrl_req().request;
+            match request {
                 GUD_REQ_GET_STATUS => {
                     req.send(&[GUD_STATUS_OK]).context("send status")?;
                     debug!("sent status");
@@ -398,13 +439,18 @@ pub fn event(event: FunctionfsEvent) -> anyhow::Result<Option<Event>> {
                     debug!("sent connector properties");
                 }
                 GUD_REQ_GET_CONNECTOR_MODES => {
+                    let connector = req.ctrl_req().index;
                     return Ok(Some(Event::GetDisplayModes(GetDisplayModes {
                         sender: req,
+                        connector,
                     })));
                 }
                 GUD_REQ_GET_CONNECTOR_EDID => {
-                    req.send(&[0]).context("send EDIDs")?;
-                    debug!("sent EDIDs");
+                    let connector = req.ctrl_req().index;
+                    return Ok(Some(Event::GetEdid(GetEdid {
+                        sender: req,
+                        connector,
+                    })));
                 }
                 GUD_REQ_GET_CONNECTOR_STATUS => {
                     req.send(&[GUD_CONNECTOR_STATUS_CONNECTED])
@@ -417,10 +463,11 @@ pub fn event(event: FunctionfsEvent) -> anyhow::Result<Option<Event>> {
             }
         }
         FunctionfsEvent::SetupHostToDevice(req) => {
-            let ctrl_req = req.ctrl_req();
-            match ctrl_req.request {
+            let request = req.ctrl_req().request;
+            match request {
                 GUD_REQ_SET_CONNECTOR_FORCE_DETECT => {
-                    debug!("connector set to {}", ctrl_req.value);
+                    let value = req.ctrl_req().value;
+                    debug!("connector set to {}", value);
                     req.recv_all().context("recv set connector")?;
                 }
                 GUD_REQ_SET_STATE_CHECK => {
@@ -466,4 +513,27 @@ pub fn event(event: FunctionfsEvent) -> anyhow::Result<Option<Event>> {
 pub fn pixel_data_endpoint() -> Endpoint {
     let (_rx, dir) = EndpointDirection::host_to_device();
     Endpoint::bulk(dir)
+}
+impl<'a> GetEdid<'a> {
+    pub fn connector(&self) -> u16 {
+        self.connector
+    }
+
+    pub fn max_len(&self) -> usize {
+        self.sender.len()
+    }
+
+    pub fn send_edid(self, data: &[u8]) -> anyhow::Result<()> {
+        self.sender.send(data).context("send EDID")?;
+        if data.is_empty() {
+            debug!("sent no EDID data (connector {})", self.connector);
+        } else {
+            debug!(
+                "sent {} bytes of EDID data (connector {})",
+                data.len(),
+                self.connector
+            );
+        }
+        Ok(())
+    }
 }

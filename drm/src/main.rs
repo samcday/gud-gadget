@@ -3,7 +3,8 @@ use dma_heap::{Heap, HeapKind};
 use drm::buffer::Buffer;
 use drm::control::Device;
 use gud_gadget::{
-    event as gud_event, pixel_data_endpoint, read_functionfs_event, DisplayMode, Event,
+    event as gud_event, pixel_data_endpoint, read_functionfs_event, Event, GudDisplayMode,
+    GUD_DISPLAY_MODE_FLAG_PREFERRED,
 };
 use lz4::block;
 use memmap2::{MmapMut, MmapOptions};
@@ -12,9 +13,10 @@ use nix::ioctl_write_ptr;
 use nix::libc::c_int;
 use nix::poll::{poll, PollFd, PollFlags};
 use std::env::args;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,7 +115,7 @@ fn main() -> anyhow::Result<()> {
     .register()
     .expect("gadget registration failed");
 
-    let (mut ep0, bulk_ep) = init_functionfs(&mut gud, &desc_data, &string_data)?;
+    let (mut ep0, mut bulk_ep) = init_functionfs(&mut gud, &desc_data, &string_data)?;
 
     reg.bind(Some(&udc)).expect("UDC binding failed");
 
@@ -124,7 +126,12 @@ fn main() -> anyhow::Result<()> {
     })
     .expect("cleanup handler registration failed");
 
-    let mode = connector.modes().first().unwrap();
+    let mode = connector
+        .modes()
+        .first()
+        .expect("connector must have at least one mode");
+    let preferred_mode = *mode;
+    let connector_edid = read_connector_edid(&card_path, &connector, preferred_mode);
     println!("picked mode {:?}", mode);
 
     let (width, height) = mode.size();
@@ -161,13 +168,39 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        let event = match read_functionfs_event(&mut ep0) {
-            Ok(event) => event,
-            Err(err) if is_ep0_disconnect(&err) => {
-                tracing::info!("FunctionFS endpoint closed ({err:?}); stopping");
-                break;
+        let event = loop {
+            let mut reinit = false;
+            let maybe_event = match read_functionfs_event(&mut ep0) {
+                Ok(event) => Some(event),
+                Err(err) if is_ep0_disconnect(&err) => {
+                    let err_str = format!("{err:?}");
+                    tracing::info!(
+                        "FunctionFS endpoint closed ({err_str}); reinitializing endpoints"
+                    );
+                    reinit = true;
+                    None
+                }
+                Err(err) => return Err(err.into()),
+            };
+
+            if reinit {
+                drop(maybe_event);
+                match init_functionfs(&mut gud, &desc_data, &string_data) {
+                    Ok((new_ep0, new_bulk)) => {
+                        ep0 = new_ep0;
+                        bulk_ep = new_bulk;
+                        continue;
+                    }
+                    Err(init_err) => {
+                        tracing::error!(
+                            "FunctionFS reinit failed ({init_err:?}); stopping gadget loop"
+                        );
+                        return Err(init_err);
+                    }
+                }
             }
-            Err(err) => return Err(err.into()),
+
+            break maybe_event.unwrap();
         };
 
         if let Ok(Some(gud_event)) = gud_event(event) {
@@ -181,29 +214,25 @@ fn main() -> anyhow::Result<()> {
                         .expect("failed to send pixel formats");
                 }
                 Event::GetDisplayModes(req) => {
-                    let modes = card
-                        .get_modes(connector.handle())
-                        .unwrap()
-                        .iter()
-                        .map(|mode| {
-                            let (hdisplay, vdisplay) = mode.size();
-                            let (hsync_start, hsync_end, htotal) = mode.hsync();
-                            let (vsync_start, vsync_end, vtotal) = mode.vsync();
-                            DisplayMode {
-                                clock: mode.clock(),
-                                hdisplay,
-                                htotal,
-                                hsync_end,
-                                hsync_start,
-                                vtotal,
-                                vdisplay,
-                                vsync_end,
-                                vsync_start,
-                                flags: 0,
-                            }
-                        })
-                        .collect::<Vec<DisplayMode>>();
-                    req.send_modes(&modes).expect("failed to send modes");
+                    if req.connector() == 0 {
+                        let mode = gud_mode_from_drm(preferred_mode, true);
+                        req.send_modes(&[mode]).expect("failed to send modes");
+                    } else {
+                        req.send_modes(&[]).expect("failed to send modes");
+                    }
+                }
+                Event::GetEdid(req) => {
+                    if req.connector() == 0 {
+                        if connector_edid.is_empty() {
+                            req.send_edid(&[]).expect("failed to send EDID");
+                        } else {
+                            let len = connector_edid.len().min(req.max_len());
+                            req.send_edid(&connector_edid[..len])
+                                .expect("failed to send EDID");
+                        }
+                    } else {
+                        req.send_edid(&[]).expect("failed to send EDID");
+                    }
                 }
                 Event::Buffer(info) => {
                     handle_buffer(
@@ -362,3 +391,159 @@ struct UsbFfsDmabufTransferReq {
 ioctl_write_ptr!(ffs_dmabuf_attach, b'g', 131, c_int);
 ioctl_write_ptr!(ffs_dmabuf_detach, b'g', 132, c_int);
 ioctl_write_ptr!(ffs_dmabuf_transfer, b'g', 133, UsbFfsDmabufTransferReq);
+
+fn gud_mode_from_drm(mode: drm::control::Mode, preferred: bool) -> GudDisplayMode {
+    let (hdisplay, vdisplay) = mode.size();
+    let (hsync_start, hsync_end, htotal) = mode.hsync();
+    let (vsync_start, vsync_end, vtotal) = mode.vsync();
+    let mut flags = 0;
+    if preferred {
+        flags |= GUD_DISPLAY_MODE_FLAG_PREFERRED;
+    }
+
+    GudDisplayMode {
+        clock: mode.clock(),
+        hdisplay,
+        hsync_start,
+        hsync_end,
+        htotal,
+        vdisplay,
+        vsync_start,
+        vsync_end,
+        vtotal,
+        flags,
+    }
+}
+
+fn read_connector_edid(
+    card_path: &str,
+    connector: &drm::control::connector::Info,
+    preferred_mode: drm::control::Mode,
+) -> Vec<u8> {
+    let card_name = Path::new(card_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("card0");
+    let connector_name = format!(
+        "{}-{}-{}",
+        card_name,
+        connector.interface().as_str(),
+        connector.interface_id()
+    );
+    let path = Path::new("/sys/class/drm")
+        .join(connector_name)
+        .join("edid");
+    if let Ok(data) = fs::read(&path) {
+        if !data.is_empty() {
+            tracing::info!(
+                "Loaded {} bytes of EDID data from {}",
+                data.len(),
+                path.display()
+            );
+            return data;
+        }
+        tracing::warn!("EDID file {} was empty", path.display());
+    } else {
+        tracing::warn!("Failed to read EDID from {}", path.display());
+    }
+
+    let generated = generate_edid(preferred_mode);
+    tracing::info!(
+        "Generated {}-byte synthetic EDID for connector {}",
+        generated.len(),
+        connector.interface().as_str()
+    );
+    generated
+}
+
+fn generate_edid(mode: drm::control::Mode) -> Vec<u8> {
+    let mut edid = [0u8; 128];
+    edid[0..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
+    let vendor = encode_mfg_id(*b"GUD");
+    edid[8..10].copy_from_slice(&vendor.to_be_bytes());
+    edid[10..12].copy_from_slice(&0x0001u16.to_le_bytes());
+    edid[12..16].copy_from_slice(&0u32.to_le_bytes());
+    edid[16] = 1; // manufacture week
+    edid[17] = 34; // 1990 + 34 = 2024
+    edid[18] = 1;
+    edid[19] = 4;
+    edid[20] = 0x80; // digital input
+    edid[21] = 0;
+    edid[22] = 0;
+    edid[23] = 0x78; // gamma 2.2
+    edid[24] = 0x0a; // sRGB + preferred timing
+                     // chromaticity defaults (approx sRGB)
+    edid[25..35].copy_from_slice(&[0x6f, 0x8a, 0x6a, 0x57, 0x4a, 0x9f, 0x26, 0x10, 0x45, 0x46]);
+    // established timings/standard timings zeroed
+    edid[35..38].fill(0);
+    edid[38..54].fill(0x01);
+
+    let detailed = detailed_timing_descriptor(mode);
+    edid[54..72].copy_from_slice(&detailed);
+    edid[72..90].copy_from_slice(&descriptor_string(0xFC, "GUD Display"));
+    edid[90..108].copy_from_slice(&descriptor_string(0xFE, "GUD Panel"));
+    edid[108..126].fill(0);
+
+    edid[126] = 0; // no extensions
+    let sum: u16 = edid.iter().take(127).map(|b| *b as u16).sum();
+    edid[127] = ((256 - (sum % 256)) & 0xFF) as u8;
+    edid.to_vec()
+}
+
+fn encode_mfg_id(tag: [u8; 3]) -> u16 {
+    let mut value = 0u16;
+    for (i, ch) in tag.iter().enumerate() {
+        let letter = (ch.to_ascii_uppercase() - b'@') as u16;
+        value |= letter << (10 - (i as u16 * 5));
+    }
+    value
+}
+
+fn descriptor_string(tag: u8, text: &str) -> [u8; 18] {
+    let mut desc = [0u8; 18];
+    desc[3] = tag;
+    let mut buf = [b' '; 13];
+    let bytes = text.as_bytes();
+    let len = bytes.len().min(12);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf[len] = 0x0a;
+    desc[5..18].copy_from_slice(&buf);
+    desc
+}
+
+fn detailed_timing_descriptor(mode: drm::control::Mode) -> [u8; 18] {
+    let mut dtd = [0u8; 18];
+    let (hdisplay, vdisplay) = mode.size();
+    let (hsync_start, hsync_end, htotal) = mode.hsync();
+    let hblank = htotal - hdisplay;
+    let hsync_offset = hsync_start - hdisplay;
+    let hsync_width = hsync_end - hsync_start;
+
+    let (vsync_start, vsync_end, vtotal) = mode.vsync();
+    let vblank = vtotal - vdisplay;
+    let vsync_offset = vsync_start - vdisplay;
+    let vsync_width = vsync_end - vsync_start;
+
+    let pixel_clock = (mode.clock() / 10) as u16;
+    dtd[0..2].copy_from_slice(&pixel_clock.to_le_bytes());
+    dtd[2] = (hdisplay & 0xff) as u8;
+    dtd[3] = (hblank & 0xff) as u8;
+    dtd[4] = (((hdisplay >> 8) & 0xF) << 4 | ((hblank >> 8) & 0xF)) as u8;
+    dtd[5] = (hsync_offset & 0xff) as u8;
+    dtd[6] = (hsync_width & 0xff) as u8;
+    dtd[7] = ((((hsync_offset >> 8) & 0x3) << 6)
+        | (((hsync_width >> 8) & 0x3) << 4)
+        | (((vsync_offset >> 4) & 0x3) << 2)
+        | ((vsync_width >> 4) & 0x3)) as u8;
+    dtd[8] = (vdisplay & 0xff) as u8;
+    dtd[9] = (vblank & 0xff) as u8;
+    dtd[10] = (((vdisplay >> 8) & 0xF) << 4 | ((vblank >> 8) & 0xF)) as u8;
+    dtd[11] = (((vsync_offset & 0xF) << 4) | (vsync_width & 0xF)) as u8;
+    dtd[12] = 0; // image size unknown
+    dtd[13] = 0;
+    dtd[14] = 0;
+    dtd[15] = 0;
+    dtd[16] = 0;
+    dtd[17] = 0x00;
+    dtd
+}
