@@ -11,3 +11,7 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 usb-gadget = { version = "0.6.0", git = "https://github.com/surban/usb-gadget.git", rev = "897c511" }
 tracing = "0.1.40"
 anyhow = "1.0.80"
+dma-heap = "0.2.1"
+memmap2 = "0.9.4"
+nix = { version = "0.27.1", default-features = false, features = ["poll"] }
+lz4 = "1.24.0"
