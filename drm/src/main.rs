@@ -9,13 +9,14 @@ use gud_gadget::{
 use lz4::block;
 use memmap2::{MmapMut, MmapOptions};
 use nix::errno::Errno;
+use nix::ioctl_readwrite;
 use nix::ioctl_write_ptr;
 use nix::libc::c_int;
 use nix::poll::{poll, PollFd, PollFlags};
 use std::env::args;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -383,9 +384,10 @@ impl DmaTransfer {
             length: len as u64,
         };
         let transfer_res = unsafe { ffs_dmabuf_transfer(ep_fd, &mut req) };
+        transfer_res.context("transfer dma buffer")?;
+        wait_for_dmabuf(self.file.as_raw_fd()).context("wait for dma buffer")?;
         let mut detach_fd = self.file.as_raw_fd() as c_int;
         let detach_res = unsafe { ffs_dmabuf_detach(ep_fd, &mut detach_fd) };
-        transfer_res.context("transfer dma buffer")?;
         detach_res.context("detach dma buffer")?;
         Ok(())
     }
@@ -423,6 +425,52 @@ fn gud_mode_from_drm(mode: drm::control::Mode, preferred: bool) -> GudDisplayMod
         vtotal,
         flags,
     }
+}
+
+#[repr(C)]
+struct DmaBufExportSyncFile {
+    flags: u32,
+    fd: i32,
+}
+
+const DMA_BUF_SYNC_READ: u32 = 1 << 0;
+const DMA_BUF_SYNC_WRITE: u32 = 1 << 1;
+const DMA_BUF_SYNC_RW: u32 = DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE;
+
+ioctl_readwrite!(dma_buf_export_sync_file, b'b', 2, DmaBufExportSyncFile);
+
+fn wait_for_dmabuf(dmabuf_fd: RawFd) -> anyhow::Result<()> {
+    let mut req = DmaBufExportSyncFile {
+        flags: DMA_BUF_SYNC_RW,
+        fd: -1,
+    };
+    unsafe {
+        dma_buf_export_sync_file(dmabuf_fd, &mut req)
+            .map_err(|e| Errno::from_i32(e as i32))
+            .context("export dma-buf sync file")?;
+    }
+    if req.fd < 0 {
+        return Ok(());
+    }
+    let sync_fd = unsafe { OwnedFd::from_raw_fd(req.fd) };
+    let mut fds = [PollFd::new(&sync_fd, PollFlags::POLLIN)];
+    loop {
+        match poll(&mut fds, -1) {
+            Ok(_) => {
+                if let Some(events) = fds[0].revents() {
+                    if events.contains(PollFlags::POLLERR) {
+                        return Err(anyhow::anyhow!("dma-buf transfer error"));
+                    }
+                    if events.contains(PollFlags::POLLIN) {
+                        break;
+                    }
+                }
+            }
+            Err(Errno::EINTR) => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
 }
 
 fn read_connector_edid(
