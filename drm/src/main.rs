@@ -4,7 +4,7 @@ use drm::buffer::Buffer;
 use drm::control::Device;
 use gud_gadget::{
     event as gud_event, pixel_data_endpoint, read_functionfs_event, Event, GudDisplayMode,
-    GUD_DISPLAY_MODE_FLAG_PREFERRED,
+    GUD_DISPLAY_MODE_FLAG_PREFERRED, GUD_PIXEL_FORMAT_RGB888, GUD_PIXEL_FORMAT_XRGB8888,
 };
 use lz4::block;
 use memmap2::{MmapMut, MmapOptions};
@@ -169,38 +169,29 @@ fn main() -> anyhow::Result<()> {
         }
 
         let event = loop {
-            let mut reinit = false;
-            let maybe_event = match read_functionfs_event(&mut ep0) {
-                Ok(event) => Some(event),
-                Err(err) if is_ep0_disconnect(&err) => {
-                    let err_str = format!("{err:?}");
-                    tracing::info!(
-                        "FunctionFS endpoint closed ({err_str}); reinitializing endpoints"
-                    );
-                    reinit = true;
-                    None
-                }
-                Err(err) => return Err(err.into()),
-            };
-
-            if reinit {
-                drop(maybe_event);
-                match init_functionfs(&mut gud, &desc_data, &string_data) {
+            let result = read_functionfs_event(&mut ep0);
+            if result.is_ok() {
+                break result.unwrap();
+            }
+            let err = result.err().unwrap();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if is_ep0_disconnect(&err) {
+                tracing::info!("FunctionFS endpoint closed ({err:?}); reopening endpoints");
+                match reopen_functionfs(&mut gud) {
                     Ok((new_ep0, new_bulk)) => {
                         ep0 = new_ep0;
                         bulk_ep = new_bulk;
+                        tracing::info!("FunctionFS endpoints reopened");
                         continue;
                     }
-                    Err(init_err) => {
-                        tracing::error!(
-                            "FunctionFS reinit failed ({init_err:?}); stopping gadget loop"
-                        );
-                        return Err(init_err);
+                    Err(reopen_err) => {
+                        return Err(reopen_err);
                     }
                 }
             }
-
-            break maybe_event.unwrap();
+            return Err(err.into());
         };
 
         if let Ok(Some(gud_event)) = gud_event(event) {
@@ -210,8 +201,12 @@ fn main() -> anyhow::Result<()> {
                         .expect("failed to send descriptor");
                 }
                 Event::GetPixelFormats(req) => {
-                    req.send_pixel_formats(&[gud_gadget::GUD_PIXEL_FORMAT_RGB565])
-                        .expect("failed to send pixel formats");
+                    req.send_pixel_formats(&[
+                        gud_gadget::GUD_PIXEL_FORMAT_RGB565,
+                        GUD_PIXEL_FORMAT_RGB888,
+                        GUD_PIXEL_FORMAT_XRGB8888,
+                    ])
+                    .expect("failed to send pixel formats");
                 }
                 Event::GetDisplayModes(req) => {
                     if req.connector() == 0 {
@@ -289,6 +284,21 @@ fn init_functionfs(
         .write(true)
         .open(ffs_dir.join("ep1"))
         .context("open bulk endpoint")?;
+    Ok((ep0, bulk))
+}
+
+fn reopen_functionfs(gud: &mut Custom) -> anyhow::Result<(File, File)> {
+    let ffs_dir = gud.ffs_dir().context("get functionfs dir")?;
+    let ep0 = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(ffs_dir.join("ep0"))
+        .context("reopen ep0")?;
+    let bulk = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(ffs_dir.join("ep1"))
+        .context("reopen bulk endpoint")?;
     Ok((ep0, bulk))
 }
 
