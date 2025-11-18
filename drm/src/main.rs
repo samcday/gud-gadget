@@ -189,9 +189,12 @@ fn main() -> anyhow::Result<()> {
                     Ok((new_ep0, new_bulk)) => {
                         ep0 = new_ep0;
                         bulk_ep = new_bulk;
-                        dma_transfer
-                            .bind_endpoint(bulk_ep.as_raw_fd())
-                            .context("bind dma-buf to reopened bulk endpoint")?;
+                        if let Err(err) = dma_transfer.bind_endpoint(bulk_ep.as_raw_fd()) {
+                            tracing::warn!(
+                                "Failed to rebind dma-buf to reopened endpoint: {err:?}; \
+                                 continuing with new endpoint"
+                            );
+                        }
                         tracing::info!("FunctionFS endpoints reopened");
                         continue;
                     }
