@@ -323,28 +323,32 @@ fn handle_buffer(
 
     let mut transfer = DmaTransfer::new(heap, len)?;
     transfer.receive(ep_fd, len)?;
+    let cpu_guard = transfer.cpu_read_guard()?;
 
-    let data: &[u8] = if info.compression > 0 {
-        decompress_buf.resize(info.length as usize, 0);
-        block::decompress_to_buffer(transfer.bytes(), Some(info.length as i32), decompress_buf)
-            .context("lz4 decompress")?;
-        &decompress_buf[..info.length as usize]
-    } else {
-        transfer.bytes()
-    };
+    {
+        let data: &[u8] = if info.compression > 0 {
+            decompress_buf.resize(info.length as usize, 0);
+            block::decompress_to_buffer(transfer.bytes(), Some(info.length as i32), decompress_buf)
+                .context("lz4 decompress")?;
+            &decompress_buf[..info.length as usize]
+        } else {
+            transfer.bytes()
+        };
 
-    let mut y = info.y as usize;
-    let end_y = (info.y + info.height) as usize;
-    let line_len = info.width as usize * bpp;
-    let line_start = info.x as usize * bpp;
-    let mut buf_pos = 0usize;
-    while y < end_y {
-        let fb_start = (y * fb_pitch) + line_start;
-        let fb_end = fb_start + line_len;
-        fb[fb_start..fb_end].copy_from_slice(&data[buf_pos..buf_pos + line_len]);
-        buf_pos += line_len;
-        y += 1;
+        let mut y = info.y as usize;
+        let end_y = (info.y + info.height) as usize;
+        let line_len = info.width as usize * bpp;
+        let line_start = info.x as usize * bpp;
+        let mut buf_pos = 0usize;
+        while y < end_y {
+            let fb_start = (y * fb_pitch) + line_start;
+            let fb_end = fb_start + line_len;
+            fb[fb_start..fb_end].copy_from_slice(&data[buf_pos..buf_pos + line_len]);
+            buf_pos += line_len;
+            y += 1;
+        }
     }
+    cpu_guard.finish()?;
 
     Ok(())
 }
@@ -371,6 +375,18 @@ impl DmaTransfer {
         &self.map
     }
 
+    fn cpu_read_guard(&self) -> anyhow::Result<DmaBufCpuReadGuard<'_>> {
+        DmaBufCpuReadGuard::new(self)
+    }
+
+    fn sync_for_cpu_start(&self) -> anyhow::Result<()> {
+        sync_dmabuf(self.file.as_raw_fd(), DMA_BUF_SYNC_READ, false)
+    }
+
+    fn sync_for_cpu_end(&self) -> anyhow::Result<()> {
+        sync_dmabuf(self.file.as_raw_fd(), DMA_BUF_SYNC_READ, true)
+    }
+
     fn receive(&mut self, ep_fd: RawFd, len: usize) -> anyhow::Result<()> {
         let mut buffer_fd = self.file.as_raw_fd() as c_int;
         unsafe { ffs_dmabuf_attach(ep_fd, &mut buffer_fd) }.context("attach dma buffer")?;
@@ -386,6 +402,34 @@ impl DmaTransfer {
         let detach_res = unsafe { ffs_dmabuf_detach(ep_fd, &mut detach_fd) };
         detach_res.context("detach dma buffer")?;
         Ok(())
+    }
+}
+
+struct DmaBufCpuReadGuard<'a> {
+    transfer: &'a DmaTransfer,
+    finished: bool,
+}
+
+impl<'a> DmaBufCpuReadGuard<'a> {
+    fn new(transfer: &'a DmaTransfer) -> anyhow::Result<Self> {
+        transfer.sync_for_cpu_start()?;
+        Ok(Self {
+            transfer,
+            finished: false,
+        })
+    }
+
+    fn finish(mut self) -> anyhow::Result<()> {
+        self.finished = true;
+        self.transfer.sync_for_cpu_end()
+    }
+}
+
+impl Drop for DmaBufCpuReadGuard<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.transfer.sync_for_cpu_end();
+        }
     }
 }
 
@@ -434,6 +478,27 @@ const DMA_BUF_SYNC_WRITE: u32 = 1 << 1;
 const DMA_BUF_SYNC_RW: u32 = DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE;
 
 ioctl_readwrite!(dma_buf_export_sync_file, b'b', 2, DmaBufExportSyncFile);
+
+#[repr(C)]
+struct DmaBufSync {
+    flags: u64,
+}
+
+const DMA_BUF_SYNC_END: u64 = 1 << 2;
+
+ioctl_write_ptr!(dma_buf_sync_ioctl, b'b', 0, DmaBufSync);
+
+fn sync_dmabuf(dmabuf_fd: RawFd, flags: u32, end: bool) -> anyhow::Result<()> {
+    let mut req = DmaBufSync {
+        flags: u64::from(flags) | if end { DMA_BUF_SYNC_END } else { 0 },
+    };
+    unsafe {
+        dma_buf_sync_ioctl(dmabuf_fd, &mut req)
+            .map_err(|e| Errno::from_i32(e as i32))
+            .context("sync dma-buf")?;
+    }
+    Ok(())
+}
 
 fn wait_for_dmabuf(dmabuf_fd: RawFd) -> anyhow::Result<()> {
     let mut req = DmaBufExportSyncFile {
