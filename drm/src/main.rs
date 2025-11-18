@@ -4,7 +4,7 @@ use drm::buffer::Buffer;
 use drm::control::Device;
 use gud_gadget::{
     event as gud_event, pixel_data_endpoint, read_functionfs_event, Event, GudDisplayMode,
-    GUD_DISPLAY_MODE_FLAG_PREFERRED, GUD_PIXEL_FORMAT_RGB888, GUD_PIXEL_FORMAT_XRGB8888,
+    GUD_DISPLAY_MODE_FLAG_PREFERRED,
 };
 use lz4::block;
 use memmap2::{MmapMut, MmapOptions};
@@ -202,12 +202,8 @@ fn main() -> anyhow::Result<()> {
                         .expect("failed to send descriptor");
                 }
                 Event::GetPixelFormats(req) => {
-                    req.send_pixel_formats(&[
-                        gud_gadget::GUD_PIXEL_FORMAT_RGB565,
-                        GUD_PIXEL_FORMAT_RGB888,
-                        GUD_PIXEL_FORMAT_XRGB8888,
-                    ])
-                    .expect("failed to send pixel formats");
+                    req.send_pixel_formats(&[gud_gadget::GUD_PIXEL_FORMAT_RGB565])
+                        .expect("failed to send pixel formats");
                 }
                 Event::GetDisplayModes(req) => {
                     if req.connector() == 0 {

@@ -471,8 +471,8 @@ pub fn event(event: FunctionfsEvent) -> anyhow::Result<Option<Event>> {
                     req.recv_all().context("recv set connector")?;
                 }
                 GUD_REQ_SET_STATE_CHECK => {
-                    debug!("received state check");
-                    req.recv_all().context("recv set state check")?;
+                    let payload = req.recv_all().context("recv set state check")?;
+                    debug!("received state check ({} bytes)", payload.len());
                 }
                 GUD_REQ_SET_CONTROLLER_ENABLE => {
                     let req = req.recv_all().context("recv set controller enable")?;
