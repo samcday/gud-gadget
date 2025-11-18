@@ -389,15 +389,32 @@ impl DmaTransfer {
 
     fn receive(&mut self, ep_fd: RawFd, len: usize) -> anyhow::Result<()> {
         let mut buffer_fd = self.file.as_raw_fd() as c_int;
+        tracing::trace!(
+            "Attaching dma-buf fd {} to ep fd {} for {} bytes",
+            buffer_fd,
+            ep_fd,
+            len
+        );
         unsafe { ffs_dmabuf_attach(ep_fd, &mut buffer_fd) }.context("attach dma buffer")?;
         let mut req = UsbFfsDmabufTransferReq {
             fd: self.file.as_raw_fd(),
             flags: 0,
             length: len as u64,
         };
+        tracing::trace!(
+            "Submitting FUNCTIONFS_DMABUF_TRANSFER fd {} len {}",
+            req.fd,
+            req.length
+        );
         let transfer_res = unsafe { ffs_dmabuf_transfer(ep_fd, &mut req) };
         transfer_res.context("transfer dma buffer")?;
+        tracing::trace!("Waiting for dma-buf fence on fd {}", self.file.as_raw_fd());
         wait_for_dmabuf(self.file.as_raw_fd()).context("wait for dma buffer")?;
+        tracing::trace!(
+            "Fence signalled, detaching dma-buf fd {} from ep fd {}",
+            buffer_fd,
+            ep_fd
+        );
         let mut detach_fd = self.file.as_raw_fd() as c_int;
         let detach_res = unsafe { ffs_dmabuf_detach(ep_fd, &mut detach_fd) };
         detach_res.context("detach dma buffer")?;
