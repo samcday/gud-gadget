@@ -180,7 +180,7 @@ fn main() -> anyhow::Result<()> {
             }
             if is_ep0_disconnect(&err) {
                 tracing::info!("FunctionFS endpoint closed ({err:?}); reopening endpoints");
-                match reopen_functionfs(&mut gud) {
+                match reopen_functionfs(&mut gud, &desc_data, &string_data) {
                     Ok((new_ep0, new_bulk)) => {
                         ep0 = new_ep0;
                         bulk_ep = new_bulk;
@@ -284,13 +284,21 @@ fn init_functionfs(
     Ok((ep0, bulk))
 }
 
-fn reopen_functionfs(gud: &mut Custom) -> anyhow::Result<(File, File)> {
+fn reopen_functionfs(
+    gud: &mut Custom,
+    desc_data: &[u8],
+    string_data: &[u8],
+) -> anyhow::Result<(File, File)> {
     let ffs_dir = gud.ffs_dir().context("get functionfs dir")?;
-    let ep0 = OpenOptions::new()
+    let mut ep0 = OpenOptions::new()
         .read(true)
         .write(true)
         .open(ffs_dir.join("ep0"))
         .context("reopen ep0")?;
+    ep0.write_all(desc_data)
+        .context("rewrite descriptors on reopen")?;
+    ep0.write_all(string_data)
+        .context("rewrite strings on reopen")?;
     let bulk = OpenOptions::new()
         .read(true)
         .write(true)
