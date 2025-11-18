@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{bail, Context};
 use dma_heap::{Heap, HeapKind};
 use drm::buffer::Buffer;
 use drm::control::Device;
@@ -163,6 +163,11 @@ fn main() -> anyhow::Result<()> {
 
     let dma_heap = Heap::new(HeapKind::System).context("open dma heap")?;
     let mut decompress_buf = Vec::new();
+    let max_transfer_size = (max_width * max_height * 4) as usize;
+    let mut dma_transfer = DmaTransfer::new(&dma_heap, max_transfer_size)?;
+    dma_transfer
+        .bind_endpoint(bulk_ep.as_raw_fd())
+        .context("bind dma-buf to initial bulk endpoint")?;
 
     while running.load(Ordering::Relaxed) {
         if !wait_for_event(&ep0, Duration::from_millis(100))? {
@@ -184,6 +189,9 @@ fn main() -> anyhow::Result<()> {
                     Ok((new_ep0, new_bulk)) => {
                         ep0 = new_ep0;
                         bulk_ep = new_bulk;
+                        dma_transfer
+                            .bind_endpoint(bulk_ep.as_raw_fd())
+                            .context("bind dma-buf to reopened bulk endpoint")?;
                         tracing::info!("FunctionFS endpoints reopened");
                         continue;
                     }
@@ -228,7 +236,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 Event::Buffer(info) => {
                     handle_buffer(
-                        &dma_heap,
+                        &mut dma_transfer,
                         bulk_ep.as_raw_fd(),
                         info,
                         mapping.as_mut(),
@@ -307,7 +315,7 @@ fn is_ep0_disconnect(err: &io::Error) -> bool {
 }
 
 fn handle_buffer(
-    heap: &Heap,
+    dma_transfer: &mut DmaTransfer,
     ep_fd: RawFd,
     info: gud_gadget::SetBuffer,
     fb: &mut [u8],
@@ -321,18 +329,21 @@ fn handle_buffer(
         info.length
     } as usize;
 
-    let mut transfer = DmaTransfer::new(heap, len)?;
-    transfer.receive(ep_fd, len)?;
-    let cpu_guard = transfer.cpu_read_guard()?;
+    dma_transfer.receive(ep_fd, len)?;
+    let cpu_guard = dma_transfer.cpu_read_guard()?;
 
     {
         let data: &[u8] = if info.compression > 0 {
             decompress_buf.resize(info.length as usize, 0);
-            block::decompress_to_buffer(transfer.bytes(), Some(info.length as i32), decompress_buf)
-                .context("lz4 decompress")?;
+            block::decompress_to_buffer(
+                dma_transfer.bytes(),
+                Some(info.length as i32),
+                decompress_buf,
+            )
+            .context("lz4 decompress")?;
             &decompress_buf[..info.length as usize]
         } else {
-            transfer.bytes()
+            dma_transfer.bytes()
         };
 
         let mut y = info.y as usize;
@@ -356,6 +367,8 @@ fn handle_buffer(
 struct DmaTransfer {
     file: File,
     map: MmapMut,
+    attached_ep: Option<RawFd>,
+    valid_len: usize,
 }
 
 impl DmaTransfer {
@@ -368,11 +381,20 @@ impl DmaTransfer {
                 .map_mut(&file)
                 .context("mmap dma buffer")?
         };
-        Ok(Self { file, map })
+        Ok(Self {
+            file,
+            map,
+            attached_ep: None,
+            valid_len: 0,
+        })
+    }
+
+    fn capacity(&self) -> usize {
+        self.map.len()
     }
 
     fn bytes(&self) -> &[u8] {
-        &self.map
+        &self.map[..self.valid_len]
     }
 
     fn cpu_read_guard(&self) -> anyhow::Result<DmaBufCpuReadGuard<'_>> {
@@ -387,15 +409,41 @@ impl DmaTransfer {
         sync_dmabuf(self.file.as_raw_fd(), DMA_BUF_SYNC_READ, true)
     }
 
-    fn receive(&mut self, ep_fd: RawFd, len: usize) -> anyhow::Result<()> {
+    fn bind_endpoint(&mut self, ep_fd: RawFd) -> anyhow::Result<()> {
+        if self.attached_ep == Some(ep_fd) {
+            return Ok(());
+        }
+        if let Some(current_ep) = self.attached_ep.take() {
+            let mut detach_fd = self.file.as_raw_fd() as c_int;
+            tracing::trace!(
+                "Detaching dma-buf fd {} from previous ep fd {}",
+                detach_fd,
+                current_ep
+            );
+            unsafe { ffs_dmabuf_detach(current_ep, &mut detach_fd) }
+                .context("detach dma buffer")?;
+        }
         let mut buffer_fd = self.file.as_raw_fd() as c_int;
         tracing::trace!(
-            "Attaching dma-buf fd {} to ep fd {} for {} bytes",
+            "Attaching dma-buf fd {} to ep fd {} (capacity {} bytes)",
             buffer_fd,
             ep_fd,
-            len
+            self.capacity()
         );
         unsafe { ffs_dmabuf_attach(ep_fd, &mut buffer_fd) }.context("attach dma buffer")?;
+        self.attached_ep = Some(ep_fd);
+        Ok(())
+    }
+
+    fn receive(&mut self, ep_fd: RawFd, len: usize) -> anyhow::Result<()> {
+        if len > self.capacity() {
+            bail!(
+                "transfer length {} exceeds dma-buf capacity {}",
+                len,
+                self.capacity()
+            );
+        }
+        self.bind_endpoint(ep_fd)?;
         let mut req = UsbFfsDmabufTransferReq {
             fd: self.file.as_raw_fd(),
             flags: 0,
@@ -410,15 +458,19 @@ impl DmaTransfer {
         transfer_res.context("transfer dma buffer")?;
         tracing::trace!("Waiting for dma-buf fence on fd {}", self.file.as_raw_fd());
         wait_for_dmabuf(self.file.as_raw_fd()).context("wait for dma buffer")?;
-        tracing::trace!(
-            "Fence signalled, detaching dma-buf fd {} from ep fd {}",
-            buffer_fd,
-            ep_fd
-        );
-        let mut detach_fd = self.file.as_raw_fd() as c_int;
-        let detach_res = unsafe { ffs_dmabuf_detach(ep_fd, &mut detach_fd) };
-        detach_res.context("detach dma buffer")?;
+        tracing::trace!("Fence signalled for fd {}", self.file.as_raw_fd());
+        self.valid_len = len;
         Ok(())
+    }
+}
+
+impl Drop for DmaTransfer {
+    fn drop(&mut self) {
+        if let Some(ep_fd) = self.attached_ep {
+            let mut detach_fd = self.file.as_raw_fd() as c_int;
+            let _ = unsafe { ffs_dmabuf_detach(ep_fd, &mut detach_fd) };
+            self.attached_ep = None;
+        }
     }
 }
 
