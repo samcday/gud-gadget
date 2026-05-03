@@ -46,10 +46,20 @@ fn main() -> anyhow::Result<()> {
         .with(EnvFilter::from_default_env())
         .init();
 
-    let card_path = args()
-        .skip(1)
-        .next()
-        .expect("specify full path to /dev/dri/cardN as program argument");
+    let mut args = args().skip(1);
+    let card_path = args.next().expect(
+        "specify full path to /dev/dri/cardN as program argument, or --headless [WIDTHxHEIGHT]",
+    );
+
+    if card_path == "--headless" {
+        let (width, height) = args
+            .next()
+            .map(|s| parse_size(&s))
+            .transpose()?
+            .unwrap_or((800, 600));
+        return run_headless(width, height);
+    }
+
     let card = Card::open(&card_path);
     let udc = default_udc().expect("no UDC found");
 
@@ -154,9 +164,12 @@ fn main() -> anyhow::Result<()> {
         .expect("map_dumb_buffer failed");
 
     while running.load(Ordering::Relaxed) {
-        let event = gud
-            .event_timeout(Duration::from_millis(100))
-            .expect("read GUD event");
+        let event = match gud.event_timeout(Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => break,
+            Err(_) if !running.load(Ordering::Relaxed) => break,
+            Err(err) => return Err(err.into()),
+        };
         if event.is_none() {
             continue;
         }
@@ -201,6 +214,105 @@ fn main() -> anyhow::Result<()> {
                         .recv_buffer(info, mapping.as_mut(), pitch as usize, 2)
                         .expect("recv_buffer failed");
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_size(size: &str) -> anyhow::Result<(u16, u16)> {
+    let (width, height) = size
+        .split_once('x')
+        .ok_or_else(|| anyhow::anyhow!("expected size as WIDTHxHEIGHT"))?;
+    Ok((width.parse()?, height.parse()?))
+}
+
+fn fixed_mode(width: u16, height: u16) -> DisplayMode {
+    let hsync_start = width + 40;
+    let hsync_end = hsync_start + 48;
+    let htotal = hsync_end + 40;
+    let vsync_start = height + 13;
+    let vsync_end = vsync_start + 3;
+    let vtotal = vsync_end + 29;
+
+    DisplayMode {
+        clock: htotal as u32 * vtotal as u32 * 60 / 1000,
+        hdisplay: width,
+        hsync_start,
+        hsync_end,
+        htotal,
+        vdisplay: height,
+        vsync_start,
+        vsync_end,
+        vtotal,
+        flags: 0,
+    }
+}
+
+fn run_headless(width: u16, height: u16) -> anyhow::Result<()> {
+    let udc = default_udc().expect("no UDC found");
+
+    gadgetry_most_foul::remove_all().expect("UDC init failed");
+
+    let (mut gud_data, gud_data_ep) = gud_gadget::PixelDataEndpoint::new();
+    let (mut gud, gud_handle) = Custom::builder()
+        .with_interface(
+            Interface::new(Class::vendor_specific(Class::VENDOR_SPECIFIC, 0), "GUD")
+                .with_endpoint(gud_data_ep),
+        )
+        .build();
+
+    let _reg = Gadget::new(
+        Class::interface_specific(),
+        gud_gadget::OPENMOKO_GUD_ID,
+        Strings::new("The Internet", "Generic USB Display", ""),
+    )
+    .with_config(Config::new("gud").with_function(gud_handle))
+    .bind(&udc)
+    .expect("UDC binding failed");
+
+    let running = Arc::new(AtomicBool::new(true));
+
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("cleanup handler registration failed");
+
+    let mode = fixed_mode(width, height);
+    let pitch = width as usize * 2;
+    let mut fb = vec![0; pitch * height as usize];
+
+    println!("headless GUD gadget using mode {:?}", mode);
+
+    while running.load(Ordering::Relaxed) {
+        let event = match gud.event_timeout(Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => break,
+            Err(_) if !running.load(Ordering::Relaxed) => break,
+            Err(err) => return Err(err.into()),
+        };
+        if event.is_none() {
+            continue;
+        }
+        let event = event.unwrap();
+
+        if let Ok(Some(gud_event)) = gud_gadget::event(event) {
+            match gud_event {
+                Event::GetDescriptor(req) => req
+                    .send_descriptor(width.into(), height.into(), width.into(), height.into())
+                    .expect("failed to send descriptor"),
+                Event::GetPixelFormats(req) => req
+                    .send_pixel_formats(&[gud_gadget::GUD_PIXEL_FORMAT_RGB565])
+                    .unwrap(),
+                Event::GetDisplayModes(req) => {
+                    req.send_modes(&[fixed_mode(width, height)])
+                        .expect("failed to send modes");
+                }
+                Event::Buffer(info) => gud_data
+                    .recv_buffer(info, &mut fb, pitch, 2)
+                    .expect("recv_buffer failed"),
             }
         }
     }

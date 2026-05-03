@@ -27,8 +27,6 @@ const GUD_REQ_SET_STATE_COMMIT: u8 = 0x62;
 const GUD_REQ_SET_CONTROLLER_ENABLE: u8 = 0x63;
 const GUD_REQ_SET_DISPLAY_ENABLE: u8 = 0x64;
 
-const GUD_DISPLAY_FLAG_FULL_UPDATE: u32 = 0x02;
-
 const GUD_CONNECTOR_STATUS_CONNECTED: u8 = 0x01;
 
 pub const GUD_PIXEL_FORMAT_RGB565: u8 = 0x40;
@@ -318,7 +316,7 @@ impl PixelDataEndpoint {
 
         let buf = if info.compression > 0 {
             let decompress_start = Instant::now();
-            if self.compress_buf.len() != info.length as usize {
+            if self.compress_buf.len() < info.length as usize {
                 self.compress_buf.resize(info.length as usize, 0);
             }
             lz4::block::decompress_to_buffer(
