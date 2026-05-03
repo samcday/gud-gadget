@@ -8,6 +8,6 @@ ctrlc = "3.4.2"
 drm = "0.11.1"
 gud-gadget = { path = "../gadget" }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-usb-gadget = { version = "0.6.0", git = "https://github.com/surban/usb-gadget.git", rev = "897c511" }
+gadgetry-most-foul = { git = "https://github.com/samcday/gadgetry-most-foul.git" }
 tracing = "0.1.40"
 anyhow = "1.0.80"

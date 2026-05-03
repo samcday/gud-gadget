@@ -4,9 +4,9 @@ use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 use bytes::BytesMut;
-use usb_gadget::function::custom;
-use usb_gadget::function::custom::{CtrlSender, Endpoint, EndpointDirection, EndpointReceiver};
-use usb_gadget::Id;
+use gadgetry_most_foul::function::custom;
+use gadgetry_most_foul::function::custom::{CtrlSender, Endpoint, EndpointDirection, EndpointOut};
+use gadgetry_most_foul::Id;
 
 const GUD_DISPLAY_MAGIC: u32 = 0x1d50614d;
 
@@ -51,9 +51,7 @@ struct ConnectorDescriptor {
 }
 
 pub struct PixelDataEndpoint {
-    ep_rx: EndpointReceiver,
-    // A collection of the small buffers we've allocated for submission to AIO to read from the endpoint.
-    ep_buf: Vec<BytesMut>,
+    ep_rx: EndpointOut,
     // The full contents of a transmitted buffer are copied here.
     buf: BytesMut,
     // If compression is enabled, the received buffer is decompressed here.
@@ -157,7 +155,7 @@ impl<'a> GetDisplayModes<'a> {
     }
 }
 
-impl <'a> GetPixelFormats<'a> {
+impl<'a> GetPixelFormats<'a> {
     pub fn send_pixel_formats(self, formats: &[u8]) -> anyhow::Result<()> {
         self.sender.send(formats).context("send pixel formats")?;
         debug!("sent pixel formats: {:?}", formats);
@@ -178,7 +176,7 @@ struct DisplayDescriptor {
     max_height: u32,
 }
 
-pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
+pub fn event<'a>(event: custom::Event<'a>) -> anyhow::Result<Option<Event<'a>>> {
     match event {
         custom::Event::Enable => {}
         custom::Event::Bind => {}
@@ -190,9 +188,7 @@ pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
                     debug!("sent status");
                 }
                 GUD_REQ_GET_DESCRIPTOR => {
-                    return Ok(Some(Event::GetDescriptor(GetDescriptor {
-                        sender: req,
-                    })));
+                    return Ok(Some(Event::GetDescriptor(GetDescriptor { sender: req })));
                 }
                 GUD_REQ_GET_FORMATS => {
                     return Ok(Some(Event::GetPixelFormats(GetPixelFormats {
@@ -222,9 +218,9 @@ pub fn event(event: custom::Event) -> anyhow::Result<Option<Event>> {
                     debug!("sent connector properties");
                 }
                 GUD_REQ_GET_CONNECTOR_MODES => {
-                    return Ok(Some(Event::GetDisplayModes(
-                        GetDisplayModes { sender: req },
-                    )));
+                    return Ok(Some(Event::GetDisplayModes(GetDisplayModes {
+                        sender: req,
+                    })));
                 }
                 GUD_REQ_GET_CONNECTOR_EDID => {
                     req.send(&[0]).context("send EDIDs")?;
@@ -290,7 +286,6 @@ impl PixelDataEndpoint {
         (
             Self {
                 ep_rx,
-                ep_buf: Vec::new(),
                 buf: BytesMut::new(),
                 compress_buf: BytesMut::new(),
             },
@@ -306,48 +301,25 @@ impl PixelDataEndpoint {
         bpp: usize,
     ) -> anyhow::Result<()> {
         let start = Instant::now();
-        let max_packet_size = self.ep_rx.max_packet_size().unwrap();
 
         let len = if info.compression > 0 {
             info.compressed_length
         } else {
             info.length
         } as usize;
-        self.buf.clear();
-
-        // Ensure the buffer is large enough to fit all incoming data.
-        if self.buf.capacity() < len {
-            self.buf.reserve(len - self.buf.capacity());
-        }
 
         // Read the incoming data fully into the buffer.
         let read_start = Instant::now();
-        while self.buf.len() < len {
-            let buf = self
-                .ep_buf
-                .pop()
-                .unwrap_or_else(|| BytesMut::with_capacity(max_packet_size));
-            let buf = self.ep_rx.recv(buf).context("read bulk ep")?;
-            if buf.is_none() {
-                continue;
-            }
-            let mut buf = buf.unwrap();
-            self.buf.extend_from_slice(&buf);
-            buf.clear();
-            self.ep_buf.push(buf);
-        }
+        self.buf.resize(len, 0);
+        self.ep_rx
+            .read_exact(&mut self.buf[..])
+            .context("read bulk ep")?;
         trace!("read buffer took {}ms", read_start.elapsed().as_millis());
-
-        if self.buf.len() != len {
-            // TODO: proper Err
-            panic!("expected buf len {}, got {}", len, self.buf.len());
-        }
 
         let buf = if info.compression > 0 {
             let decompress_start = Instant::now();
-            if self.compress_buf.len() < info.length as usize {
-                self.compress_buf
-                    .resize(info.length as usize - self.compress_buf.capacity(), 0);
+            if self.compress_buf.len() != info.length as usize {
+                self.compress_buf.resize(info.length as usize, 0);
             }
             lz4::block::decompress_to_buffer(
                 &self.buf,

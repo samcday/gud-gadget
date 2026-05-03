@@ -1,13 +1,13 @@
 use drm::buffer::Buffer;
 use drm::control::Device;
+use gadgetry_most_foul::function::custom::{Custom, Interface};
+use gadgetry_most_foul::{default_udc, Class, Config, Gadget, Strings};
 use gud_gadget::{DisplayMode, Event};
 use std::env::args;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use usb_gadget::function::custom::{Custom, Interface};
-use usb_gadget::{default_udc, Class, Config, Gadget, Strings};
 
 #[derive(Debug)]
 /// A simple wrapper for a device node.
@@ -94,7 +94,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    usb_gadget::remove_all().expect("UDC init failed");
+    gadgetry_most_foul::remove_all().expect("UDC init failed");
 
     let (mut gud_data, gud_data_ep) = gud_gadget::PixelDataEndpoint::new();
     let (mut gud, gud_handle) = Custom::builder()
@@ -105,7 +105,7 @@ fn main() -> anyhow::Result<()> {
         .build();
 
     let _reg = Gadget::new(
-        Class::interface_specific(),
+        Class::INTERFACE_SPECIFIC,
         gud_gadget::OPENMOKO_GUD_ID,
         Strings::new("The Internet", "Generic USB Display", ""),
     )
@@ -168,9 +168,9 @@ fn main() -> anyhow::Result<()> {
                     req.send_descriptor(min_width, min_height, max_width, max_height)
                         .expect("failed to send descriptor");
                 }
-                Event::GetPixelFormats(req) => {
-                    req.send_pixel_formats(&[gud_gadget::GUD_PIXEL_FORMAT_RGB565]).unwrap()
-                }
+                Event::GetPixelFormats(req) => req
+                    .send_pixel_formats(&[gud_gadget::GUD_PIXEL_FORMAT_RGB565])
+                    .unwrap(),
                 Event::GetDisplayModes(req) => {
                     let modes = card
                         .get_modes(connector.handle())

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-usb-gadget = { version = "0.6.0", git = "https://github.com/surban/usb-gadget.git", rev = "897c511" }
+gadgetry-most-foul = { git = "https://github.com/samcday/gadgetry-most-foul.git" }
 serde = { version = "1.0.197", features = ["derive"] }
 tracing = "0.1.40"
 thiserror = "1.0.57"
